@@ -18,7 +18,7 @@ import { db } from '@/lib/firebase';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import Navbar from '@/components/Navbar';
-import { verifyOtpAttempt, OTP_EXPIRY_MINUTES, MAX_OTP_ATTEMPTS } from '@/lib/otpService';
+import { generateSecure4DigitOtp, hashOtp, verifyOtpAttempt, OTP_EXPIRY_MINUTES, MAX_OTP_ATTEMPTS } from '@/lib/otpService';
 import { logAuditEvent, AUDIT_ACTIONS } from '@/lib/auditLogger';
 import { sendNotification, NOTIFICATION_TYPES } from '@/lib/notifications';
 import {
@@ -350,60 +350,140 @@ function RequesterDonationItem({ donation, request, currentUser }) {
     fetchDonor();
   }, [donation]);
 
-  // Generate / reveal verbal code to give to the donor at hospital
+  // Generate / reveal verbal code directly via authenticated session to give to donor
   const handleGenerateRequesterOtp = async () => {
     if (!donation || !currentUser) return;
     setIsGeneratingOtp(true);
     setOtpError("");
     try {
-      const res = await fetch('/api/donations/otp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'generate-requester-otp',
-          requestId: request.id,
-          donationId: donation.id,
-          userUid: currentUser.uid,
-        }),
+      const rawRequesterOtp = generateSecure4DigitOtp();
+      const requesterOtpHash = await hashOtp(rawRequesterOtp);
+      const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+
+      await updateDoc(doc(db, "requests", request.id, "donations", donation.id), {
+        requesterOtpHash,
+        requesterOtpExpiresAt: expiresAt,
+        requesterOtpAttemptsRemaining: MAX_OTP_ATTEMPTS,
+        requesterOtpVerified: false,
+        status: 'OTP_PENDING',
+        updatedAt: serverTimestamp(),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        alert(data.error || 'Failed to generate confirmation code');
-      } else {
-        setRequesterVerbalOtp(data.requesterOtp);
-      }
+
+      setRequesterVerbalOtp(rawRequesterOtp);
+      setDonation(prev => ({
+        ...prev,
+        requesterOtpHash,
+        requesterOtpExpiresAt: expiresAt,
+        requesterOtpAttemptsRemaining: MAX_OTP_ATTEMPTS,
+      }));
     } catch (err) {
       console.error('Error generating requester verbal code:', err);
-      alert('Network error while generating code.');
+      alert(err.message || 'Error generating confirmation code.');
     } finally {
       setIsGeneratingOtp(false);
     }
   };
 
-  // Verify donor's verbal code via secure server API
+  // Verify donor's verbal code directly via authenticated atomic transaction
   const handleVerifyDonorOtp = async () => {
     if (!enteredOtp || enteredOtp.length !== 4) return;
     setIsVerifying(true);
     setOtpError("");
 
     try {
-      const res = await fetch('/api/donations/otp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'verify-counterparty-otp',
-          requestId: request.id,
-          donationId: donation.id,
-          userUid: currentUser.uid,
-          otp: enteredOtp.trim(),
-        }),
-      });
+      const cleanOtp = enteredOtp.trim();
+      const storedHash = donation.donorOtpHash;
+      const rawExpiry = donation.donorOtpExpiresAt;
+      const attemptsRemaining = donation.donorOtpAttemptsRemaining ?? MAX_OTP_ATTEMPTS;
 
-      const data = await res.json();
-      if (!res.ok) {
-        setOtpError(data.error || "Incorrect or expired code");
+      if (!storedHash) {
+        setOtpError("The donor has not generated their 4-digit code yet.");
+        setIsVerifying(false);
         return;
       }
+
+      const verifyResult = await verifyOtpAttempt({
+        enteredOtp: cleanOtp,
+        storedOtpOrHash: storedHash,
+        expiresAt: rawExpiry,
+        attemptsRemaining,
+        isHashed: true,
+      });
+
+      if (!verifyResult.success) {
+        await updateDoc(doc(db, "requests", request.id, "donations", donation.id), {
+          donorOtpAttemptsRemaining: verifyResult.attemptsRemaining,
+          updatedAt: serverTimestamp(),
+        });
+        setOtpError(verifyResult.error || "Incorrect code");
+        setIsVerifying(false);
+        return;
+      }
+
+      // Code matched! Execute atomic transaction guaranteeing unitsDonated <= unitsNeeded
+      await runTransaction(db, async (transaction) => {
+        const reqRef = doc(db, "requests", request.id);
+        const donRef = doc(db, "requests", request.id, "donations", donation.id);
+
+        const reqSnap = await transaction.get(reqRef);
+        if (!reqSnap.exists()) {
+          throw new Error("Blood request not found");
+        }
+
+        const reqData = reqSnap.data();
+        const currentUnits = Number(reqData.unitsDonated || reqData.UnitsDonated || 0);
+        const unitsNeeded = Number(reqData.unitsNeeded || reqData.UnitsNeeded || 1);
+
+        if (currentUnits >= unitsNeeded) {
+          throw new Error("This blood request has already been fully fulfilled.");
+        }
+
+        const newUnits = currentUnits + 1;
+        const isFulfilled = newUnits >= unitsNeeded;
+
+        transaction.update(reqRef, {
+          unitsDonated: newUnits,
+          UnitsDonated: newUnits,
+          status: isFulfilled ? 'FULFILLED' : 'PARTIALLY_FULFILLED',
+          updatedAt: serverTimestamp(),
+        });
+
+        transaction.update(donRef, {
+          requesterOtpVerified: true,
+          completed: true,
+          status: 'DONATION_COMPLETED',
+          completedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      });
+
+      setDonation(prev => ({
+        ...prev,
+        requesterOtpVerified: true,
+        completed: true,
+        status: 'DONATION_COMPLETED',
+      }));
+
+      // Notifications and audit
+      const donorUid = donation.donorUid || donation.donorId;
+      if (donorUid) {
+        await sendNotification({
+          recipientUid: donorUid,
+          type: NOTIFICATION_TYPES.DONATION_COMPLETED,
+          title: 'Donation Completed & Verified!',
+          message: `Your blood donation has been verified and confirmed on-site by the recipient. Thank you!`,
+          requestId: request.id,
+          donationId: donation.id,
+        }).catch(e => console.warn("Notice sending notification:", e));
+      }
+
+      await logAuditEvent({
+        action: AUDIT_ACTIONS.DONATION_COMPLETED,
+        actorUid: currentUser.uid,
+        entityType: 'donation',
+        entityId: donation.id,
+        metadata: { requestId: request.id },
+      }).catch(e => console.warn("Notice logging audit:", e));
 
       alert("Donation successfully confirmed and recorded! Thank you.");
     } catch (err) {

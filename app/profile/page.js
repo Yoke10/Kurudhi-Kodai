@@ -211,6 +211,30 @@ export default function ProfilePage() {
                   {donorData ? 'Registered Donor' : 'Not Registered'}
                 </span>
               </div>
+
+              {currentRole === ROLES.SUPERADMIN && (
+                <div className="pt-1 sm:pt-0">
+                  <Button
+                    onClick={() => router.push('/superadmin')}
+                    className="bg-purple-700 hover:bg-purple-800 text-white font-bold text-xs rounded-xl shadow-sm px-4 py-2.5 flex items-center gap-1.5"
+                  >
+                    <Shield className="w-3.5 h-3.5" />
+                    Superadmin Console
+                  </Button>
+                </div>
+              )}
+
+              {currentRole === ROLES.ADMIN && (
+                <div className="pt-1 sm:pt-0">
+                  <Button
+                    onClick={() => router.push('/admin')}
+                    className="bg-red-700 hover:bg-red-800 text-white font-bold text-xs rounded-xl shadow-sm px-4 py-2.5 flex items-center gap-1.5"
+                  >
+                    <Shield className="w-3.5 h-3.5" />
+                    Admin Console
+                  </Button>
+                </div>
+              )}
             </div>
           </div>
         </div>

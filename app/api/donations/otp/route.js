@@ -222,8 +222,13 @@ export async function POST(request) {
     return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
 
   } catch (error) {
-    console.error('API /api/donations/otp error:', error);
-    return NextResponse.json({ error: error.message || 'Internal server error' }, { status: 500 });
+    console.error('API /api/donations/otp notice:', error);
+    const isPermissionError = error?.code === 'permission-denied' || error?.message?.includes('Missing or insufficient permissions');
+    return NextResponse.json({
+      error: isPermissionError
+        ? 'Client must perform OTP generation and verification directly via authenticated Firebase session.'
+        : (error.message || 'Internal server error')
+    }, { status: isPermissionError ? 403 : 500 });
   }
 }
 

@@ -75,3 +75,19 @@ test('OTP Service - Verification Lockout after 3 Attempts', async () => {
   assert.equal(result.valid, false)
   assert.equal(result.reason, 'MAX_ATTEMPTS_EXCEEDED')
 })
+
+test('OTP Service - Non-4-digit input rejection', async () => {
+  const plainOtp = '4827'
+  const hashed = await hashOtp(plainOtp)
+  const now = new Date()
+
+  const result1 = await verifyOtpInput('12', hashed, now, 0)
+  assert.equal(result1.valid, false)
+
+  const result2 = await verifyOtpInput('12345', hashed, now, 0)
+  assert.equal(result2.valid, false)
+
+  const result3 = await verifyOtpInput('abcd', hashed, now, 0)
+  assert.equal(result3.valid, false)
+})
+

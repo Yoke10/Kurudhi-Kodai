@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import NotificationCenter from "@/components/NotificationCenter";
-import { Menu, User, X, LogOut, Shield, HeartHandshake, PlusCircle, AlertTriangle } from "lucide-react";
+import { Menu, User, X, LogOut, HeartHandshake, PlusCircle, AlertTriangle } from "lucide-react";
 import { isAdminRole, isSuperAdminRole } from "@/lib/roles";
 
 const Navbar = () => {
@@ -54,23 +54,13 @@ const Navbar = () => {
           </div>
 
           {/* Desktop Navigation Links */}
-          <div className="hidden md:flex items-center space-x-1 lg:space-x-2">
+          <div className="hidden md:flex items-center space-x-2">
             <Link href="/" className={navLinkClass("/")}>
               Home
             </Link>
             <Link href="/dashboard" className={navLinkClass("/dashboard")}>
-              {isDonor ? "Donor Dashboard" : "Donor Portal"}
+              Donor Portal
             </Link>
-            {isAdmin && (
-              <Link href="/admin" className={navLinkClass("/admin")}>
-                Admin Dashboard
-              </Link>
-            )}
-            {isSuperAdmin && (
-              <Link href="/superadmin" className={navLinkClass("/superadmin")}>
-                Superadmin Dashboard
-              </Link>
-            )}
             <Link href="/needdonor" className={navLinkClass("/needdonor")}>
               Need Blood
             </Link>
@@ -156,27 +146,6 @@ const Navbar = () => {
                         </Link>
                       )}
 
-                      {isAdmin && (
-                        <Link
-                          href="/admin"
-                          onClick={() => setShowProfileDropdown(false)}
-                          className="flex items-center px-4 py-2.5 text-sm text-gray-700 hover:bg-red-50 hover:text-red-700 transition-colors"
-                        >
-                          <Shield className="w-4 h-4 mr-2 text-red-500" />
-                          Admin Dashboard
-                        </Link>
-                      )}
-
-                      {isSuperAdmin && (
-                        <Link
-                          href="/superadmin"
-                          onClick={() => setShowProfileDropdown(false)}
-                          className="flex items-center px-4 py-2.5 text-sm text-gray-700 hover:bg-red-50 hover:text-red-700 transition-colors font-semibold"
-                        >
-                          <Shield className="w-4 h-4 mr-2 text-purple-600" />
-                          Superadmin Dashboard
-                        </Link>
-                      )}
 
                       <div className="border-t border-gray-100 mt-1">
                         <button
@@ -223,18 +192,8 @@ const Navbar = () => {
               Home
             </Link>
             <Link href="/dashboard" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/dashboard")}>
-              {isDonor ? "Donor Dashboard" : "Donor Portal"}
+              Donor Portal
             </Link>
-            {isAdmin && (
-              <Link href="/admin" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/admin")}>
-                Admin Dashboard
-              </Link>
-            )}
-            {isSuperAdmin && (
-              <Link href="/superadmin" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/superadmin")}>
-                Superadmin Dashboard
-              </Link>
-            )}
             <Link href="/needdonor" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/needdonor")}>
               Need Blood
             </Link>
@@ -258,16 +217,6 @@ const Navbar = () => {
                 {!isDonor && (
                   <Link href="/newdonor" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/newdonor")}>
                     Register as Donor
-                  </Link>
-                )}
-                {isAdmin && (
-                  <Link href="/admin" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/admin")}>
-                    Admin Dashboard
-                  </Link>
-                )}
-                {isSuperAdmin && (
-                  <Link href="/superadmin" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/superadmin")}>
-                    Superadmin Dashboard
                   </Link>
                 )}
                 <button

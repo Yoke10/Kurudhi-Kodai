@@ -1,0 +1,270 @@
+"use client";
+import Navbar from "@/components/Navbar";
+import LearnDonation from '@/components/LearnDonation';
+import DonationBenefits from '@/components/DonationBenefits';
+import '@/components/DonationBenefits.css';
+import { Activity, ArrowRight, Calendar, Heart, Mail, MapPin, Phone, Users, Shield } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { useEffect, useState } from 'react';
+import { useAuth } from "@/context/AuthContext";
+import { doc, onSnapshot, getDoc, getCountFromServer, collection } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
+
+const StatCard = ({ icon: Icon, title, value }) => (
+  <div className="bg-white bg-opacity-80 p-8 rounded-2xl shadow-xl transform hover:-translate-y-2 transition-all duration-300">
+    <div className="flex items-center justify-center w-16 h-16 bg-red-200 rounded-full mx-auto mb-4">
+      <Icon className="text-red-700 w-8 h-8" />
+    </div>
+    <h3 className="text-3xl font-extrabold text-red-900 text-center mb-2">{value}</h3>
+    <p className="text-lg text-red-700 text-center font-semibold">{title}</p>
+  </div>
+);
+
+export default function Home() {
+  const router = useRouter();
+  const { user, isDonor } = useAuth();
+
+  // Optimized statistics state powered by platformStats/global
+  const [stats, setStats] = useState({
+    activeDonors: 120,
+    livesSaved: 85,
+    successfulDonations: 140,
+    bloodCamps: 12,
+  });
+
+  useEffect(() => {
+    // 1. Primary path: Read aggregated platformStats/global document
+    const statsDocRef = doc(db, 'platformStats', 'global');
+    const unsubStats = onSnapshot(statsDocRef, (snap) => {
+      if (snap.exists()) {
+        const d = snap.data();
+        setStats({
+          activeDonors: d.activeDonors || 120,
+          livesSaved: d.livesSaved || d.fulfilledRequests || 85,
+          successfulDonations: d.successfulDonations || 140,
+          bloodCamps: d.bloodCamps || 12,
+        });
+      } else {
+        // Fallback: One-time server-side count query instead of downloading documents
+        const fallbackCounts = async () => {
+          try {
+            const [donorsCount, campsCount] = await Promise.all([
+              getCountFromServer(collection(db, 'donors')),
+              getCountFromServer(collection(db, 'camps')),
+            ]);
+            setStats(prev => ({
+              ...prev,
+              activeDonors: donorsCount.data().count || prev.activeDonors,
+              bloodCamps: campsCount.data().count || prev.bloodCamps,
+            }));
+          } catch (_) {
+            // Keep default stats
+          }
+        };
+        fallbackCounts();
+      }
+    }, (err) => {
+      console.warn("Stats listener note:", err.message);
+    });
+
+    return () => unsubStats();
+  }, []);
+
+  return (
+    <div className="min-h-screen flex flex-col bg-white">
+      <Navbar />
+      <main className="flex-grow">
+        {/* Hero Section */}
+        <section className="relative flex items-center justify-center bg-red-800 h-screen ">
+          <div className="absolute inset-0">
+            {/* Background image can be enabled if desired */}
+            {/* <img 
+              src="/4414663.jpg"
+              alt="Blood Donation" 
+              className="w-full h-full object-cover opacity-30"
+            /> */}
+            <div className="absolute inset-0 bg-red-900 opacity-60"></div>
+          </div>
+          <div className="relative z-10 container mx-auto px-4 flex flex-col md:flex-row items-center justify-between">
+            <div className="md:w-1/2 text-center md:text-left">
+              <h1 className="text-4xl sm:text-5xl md:text-7xl font-bold text-white mb-6 leading-tight animate-slide-in se:pt-44 xs:pt-0">
+                Every Drop <br /> of Blood <span className="text-red-300">Counts</span>
+              </h1>
+              <p className="text-xl md:text-2xl text-white mb-8">
+                Join our mission to save lives with every donation. Together, we make a difference.
+              </p>
+              <div className="mt-8 flex flex-col sm:flex-row justify-center gap-4 md:justify-start">
+                <button
+                  className="w-full sm:w-auto flex-1 bg-white text-red-800 px-8 py-4 rounded-full font-bold hover:bg-gray-100 transition-all flex items-center justify-center"
+                  onClick={() => router.push('/dashboard')}
+                >
+                  Donate Now <ArrowRight className="ml-2 w-5 h-5" />
+                </button>
+                <button 
+                  className="w-full sm:w-auto flex-1 border-2 border-white text-white px-8 py-4 rounded-full font-bold hover:bg-white hover:text-red-800 transition-all flex items-center justify-center"
+                  onClick={() => router.push('/needdonor')}
+                >
+                  Find Donors
+                </button>
+              </div>
+            </div>
+            <div className="md:w-1/2 mt-10 md:mt-0 flex justify-center">
+              <div className="w-full max-w-md px-4">
+                <img 
+                  src="/istockphoto-1033906526-612x612.jpg"
+                  alt="Blood Donation" 
+                  className="w-full h-[400px] object-cover rounded-2xl border-4 border-white shadow-2xl animate-float"
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Stats Section */}
+        <section className="py-16 bg-red-50">
+          <div className="container mx-auto px-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
+              <StatCard icon={Users} title="Active Donors" value={stats.activeDonors} />
+              <StatCard icon={Heart} title="Lives Saved" value={stats.livesSaved} />
+              <StatCard icon={Activity} title="Successful Donations" value={stats.successfulDonations} />
+              <StatCard icon={Calendar} title="Blood Drives" value={stats.bloodCamps} />
+            </div>
+          </div>
+        </section>
+
+        {/* Process Section */}
+        <section className="py-16 bg-white">
+          <div className="container mx-auto px-4">
+            <h2 className="text-3xl font-bold text-center text-red-900 mb-12">How It Works</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+              {[
+                {
+                  step: "1",
+                  title: "Register",
+                  description: "Sign up and provide your essential medical info."
+                },
+                {
+                  step: "2",
+                  title: "Request/Find",
+                  description: "Search for donors or post a blood request effortlessly."
+                },
+                {
+                  step: "3",
+                  title: "Connect",
+                  description: "Communicate and schedule your donation seamlessly."
+                }
+              ].map((item, index) => (
+                <div key={index} className="p-8 rounded-2xl bg-red-50 shadow-lg hover:shadow-2xl transition-shadow text-center">
+                  <div className="w-16 h-16 bg-red-700 text-white rounded-full flex items-center justify-center mx-auto mb-4 text-2xl font-bold">
+                    {item.step}
+                  </div>
+                  <h3 className="text-xl font-bold text-red-900 mb-4">{item.title}</h3>
+                  <p className="text-red-700">{item.description}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <LearnDonation />
+        
+
+        {!isDonor && (
+          <section className="bg-red-700 text-white py-20">
+            <div className="container mx-auto px-4 text-center">
+              <h2 className="text-4xl font-bold mb-6">Ready to Save Lives?</h2>
+              <p className="text-xl mb-8 max-w-2xl mx-auto">
+                Become a part of our dedicated community of blood donors and make a life-changing impact today.
+              </p>
+              <button className="bg-white text-red-700 px-10 py-4 rounded-full font-bold hover:bg-gray-100 transition-all" onClick={() => router.push('/newdonor')}>
+                Register as Donor
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* Contact Section */}
+        <section className="py-16 bg-red-50">
+          <div className="container mx-auto px-4">
+            <h2 className="text-3xl font-bold text-center text-red-900 mb-12">Get in Touch</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 max-w-4xl mx-auto">
+              <div className="flex flex-col items-center">
+                <Phone className="w-8 h-8 text-red-700 mb-2" />
+                <span className="text-red-800 font-semibold">+91 91592 74334</span>
+              </div>
+              <div className="flex flex-col items-center">
+                <Mail className="w-8 h-8 text-red-700 mb-2" />
+                <span className="text-red-800 font-semibold">kurudhikodai@gmail.com</span>
+              </div>
+              <div className="flex flex-col items-center">
+                <MapPin className="w-8 h-8 text-red-700 mb-2" />
+                <span className="text-red-800 font-semibold">Coimbatore, Tamilnadu</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+      <DonationBenefits />
+      {/* Footer */}
+      <footer className="bg-gray-900 text-white py-12">
+        <div className="container mx-auto px-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-8">
+            <div>
+              <h3 className="text-2xl font-bold mb-4">Kurudhi Kodai</h3>
+              <p className="text-gray-400">
+                Connecting blood donors with those in need since 2024.
+              </p>
+            </div>
+            <div>
+              <h4 className="text-lg font-semibold mb-4">Quick Links</h4>
+              <ul className="space-y-2">
+                <li><a href="/dashboard" className="text-gray-400 hover:text-white transition-colors">Donate Blood</a></li>
+                <li><a href="/needdonor" className="text-gray-400 hover:text-white transition-colors">Find Donors</a></li>
+                <li><a href="/camp" className="text-gray-400 hover:text-white transition-colors">Host a Camp</a></li>
+              </ul> 
+            </div>
+            <div>
+              <h4 className="text-lg font-semibold mb-4">Resources</h4>
+              <ul className="space-y-2">
+                <li><a href="https://rotaract3206.org/" target="_blank" className="text-gray-400 hover:text-white transition-colors">Rotaract 3206</a></li>
+                <li><a href="/faq" target="_blank" className="text-gray-400 hover:text-white transition-colors">FAQs</a></li>
+                <li><a href="/about" className="text-gray-400 hover:text-white transition-colors">About Us</a></li>
+                 </ul>
+            </div>
+            <div>
+              <h4 className="text-lg font-semibold mb-4">Legal</h4>
+              <ul className="space-y-2">
+                <li><a href="/privacy-policy" target="_blank" className="text-gray-400 hover:text-white transition-colors">Privacy Policy</a></li>
+                <li><a href="/terms-and-conditions" target="_blank" className="text-gray-400 hover:text-white transition-colors">Terms & Conditions</a></li>
+                <li><a href="/contact" target="_blank" className="text-gray-400 hover:text-white transition-colors">Contact Us</a></li>
+              </ul>
+            </div>
+          </div>
+          <div className="border-t border-gray-800 pt-6 text-center">
+            <p className="text-gray-400">
+              © {new Date().getFullYear()} Kurudhi Kodai. All rights reserved.
+            </p>
+          </div>
+        </div>
+      </footer>
+
+      <style jsx>{`
+        @keyframes float {
+          0% { transform: translateY(0); }
+          50% { transform: translateY(-15px); }
+          100% { transform: translateY(0); }
+        }
+        .animate-float {
+          animation: float 4s ease-in-out infinite;
+        }
+        @keyframes slide-in {
+          from { opacity: 0; transform: translateX(-50px); }
+          to { opacity: 1; transform: translateX(0); }
+        }
+        .animate-slide-in {
+          animation: slide-in 1s ease-out forwards;
+        }
+      `}</style>
+    </div>
+  );
+}

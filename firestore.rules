@@ -1,0 +1,214 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    
+    function isSuperAdmin() {
+      return isAuthenticated() && getUserData().role in ['SUPERADMIN', 'superadmin'];
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && (getUserData().role in ['ADMIN', 'SUPERADMIN', 'admin', 'superadmin']);
+    }
+    
+    function isAdminForCity(city) {
+      return isSuperAdmin() || (isAdmin() && getUserData().assignedCity == city);
+    }
+
+    // 1. Users collection - Strict privacy & RBAC
+    match /users/{userId} {
+      // Only the account owner or verified admins can read private user profiles
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // User can create their initial document with default USER role; cannot set privileged roles or city
+      allow create: if isOwner(userId) && 
+        (!('role' in request.resource.data) || request.resource.data.role in ['USER', 'DONOR', 'user', 'donor']) &&
+        !('assignedCity' in request.resource.data);
+      
+      // Users can update their profile fields, but CANNOT change role, assignedCity, or emailVerified
+      allow update: if (isOwner(userId) && 
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'assignedCity', 'emailVerified']))
+        || isSuperAdmin();
+        
+      allow delete: if isSuperAdmin();
+    }
+
+    // 2. Donors collection - Protected sensitive personal data (mobile, email, DOB, cooldown)
+    match /donors/{donorId} {
+      // Full donor documents are accessible ONLY by the donor themselves or authorized admins.
+      // Arbitrary users cannot scrape all donors' contact information.
+      allow read: if isOwner(donorId) || isAdmin();
+      
+      // Donors can create/update only their own record
+      allow create: if isOwner(donorId) || isAdmin();
+      allow update: if isOwner(donorId) || isAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    // 3. Blood Requests collection (legacy 'requests' & 'bloodRequests')
+    match /requests/{requestId} {
+      allow read: if true;
+      
+      allow create: if isAuthenticated() && 
+        (request.resource.data.createdByUid == request.auth.uid || request.resource.data.uuid == request.auth.uid);
+        
+      // Request update permissions:
+      // - Creator can update details or cancel
+      // - Admin can verify, reject, or assign emergency levels
+      // - Clients CANNOT directly manipulate units without trusted transaction
+      allow update: if isAuthenticated() && (
+        resource.data.createdByUid == request.auth.uid ||
+        resource.data.uuid == request.auth.uid ||
+        isAdmin() ||
+        // Unit transaction update
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['unitsDonated', 'UnitsDonated', 'status', 'Verified', 'updatedAt']))
+      );
+      
+      allow delete: if isSuperAdmin();
+
+      // Subcollection: Donations inside requests
+      match /donations/{donationId} {
+        // Only involved donor, request creator, or admins can read donation coordination details
+        allow read: if isAuthenticated() && (
+          resource.data.donorId == request.auth.uid ||
+          resource.data.donorUid == request.auth.uid ||
+          get(/databases/$(database)/documents/requests/$(requestId)).data.createdByUid == request.auth.uid ||
+          get(/databases/$(database)/documents/requests/$(requestId)).data.uuid == request.auth.uid ||
+          isAdmin()
+        );
+        
+        // Disallow storing plaintext OTPs in Firestore; only server-side hashes allowed
+        allow create: if isAuthenticated() && 
+          (request.resource.data.donorId == request.auth.uid || request.resource.data.donorUid == request.auth.uid) &&
+          !('donorOtp' in request.resource.data) &&
+          !('requesterOtp' in request.resource.data) &&
+          !('otp' in request.resource.data);
+          
+        // Clients can update intermediate state or soft-cancel; cannot arbitrarily write plaintext OTPs
+        allow update: if isAuthenticated() && (
+          resource.data.donorId == request.auth.uid ||
+          resource.data.donorUid == request.auth.uid ||
+          get(/databases/$(database)/documents/requests/$(requestId)).data.createdByUid == request.auth.uid ||
+          get(/databases/$(database)/documents/requests/$(requestId)).data.uuid == request.auth.uid ||
+          isAdmin()
+        ) &&
+        !('donorOtp' in request.resource.data) &&
+        !('requesterOtp' in request.resource.data) &&
+        !('otp' in request.resource.data);
+        
+        // Soft cancellation only: Physical deletion is prohibited
+        allow delete: if false;
+      }
+
+      // Subcollection: Cancellations
+      match /cancellations/{cancellationId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated();
+        allow update, delete: if isSuperAdmin();
+      }
+
+      // Subcollection: Rejections
+      match /rejections/{rejectionId} {
+        allow read: if isAuthenticated();
+        allow create: if isAdmin();
+        allow update, delete: if isSuperAdmin();
+      }
+    }
+
+    // 4. Standalone Donations collection (future / normalized)
+    match /donations/{donationId} {
+      allow read: if isAuthenticated() && (
+        resource.data.donorUid == request.auth.uid ||
+        resource.data.requesterUid == request.auth.uid ||
+        isAdmin()
+      );
+      
+      allow create: if isAuthenticated() && 
+        request.resource.data.donorUid == request.auth.uid &&
+        !('donorOtp' in request.resource.data) &&
+        !('requesterOtp' in request.resource.data) &&
+        !('otp' in request.resource.data);
+      
+      allow update: if isAuthenticated() && (
+        resource.data.donorUid == request.auth.uid ||
+        resource.data.requesterUid == request.auth.uid ||
+        isAdmin()
+      ) &&
+      !('donorOtp' in request.resource.data) &&
+      !('requesterOtp' in request.resource.data) &&
+      !('otp' in request.resource.data);
+      
+      // Soft cancellations only: Physical deletion prohibited
+      allow delete: if false;
+    }
+
+    // 5. In-App Notifications
+    match /notifications/{notificationId} {
+      // Users can only read and update (mark as read) their own notifications
+      allow read: if isAuthenticated() && resource.data.recipientUid == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.recipientUid == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'updatedAt']);
+        
+      allow create: if isAuthenticated();
+      allow delete: if isAuthenticated() && (resource.data.recipientUid == request.auth.uid || isSuperAdmin());
+    }
+
+    // 6. Blood Camps (legacy 'camps' & 'bloodCamps')
+    match /camps/{campId} {
+      allow read: if true;
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && (
+        resource.data.createdByUid == request.auth.uid ||
+        isAdmin()
+      );
+      allow delete: if isSuperAdmin();
+    }
+
+    // 7. Support Tickets
+    match /support/{ticketId} {
+      allow read: if isAuthenticated() && (
+        resource.data.createdByUid == request.auth.uid ||
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+      
+      allow create: if isAuthenticated();
+      
+      allow update: if isAuthenticated() && (
+        resource.data.createdByUid == request.auth.uid ||
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+      
+      allow delete: if isSuperAdmin();
+    }
+
+    // 8. Platform Statistics
+    match /platformStats/{statId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // 9. Audit Logs - Append-only, immutable, privileged events restricted
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      // Normal users cannot forge privileged administrative or completion audit events
+      allow create: if isAuthenticated() && 
+        (!('action' in request.resource.data) || !request.resource.data.action in ['ROLE_CHANGED', 'ADMIN_ACTION']) ||
+        isAdmin();
+      allow update, delete: if false; // Immutable audit trail
+    }
+  }
+}

@@ -2,7 +2,7 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // Helper functions
+    // Helper functions (Safe from non-existent user runtime exceptions)
     function isAuthenticated() {
       return request.auth != null;
     }
@@ -11,16 +11,20 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
     
+    function userDocExists() {
+      return isAuthenticated() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+    
     function getUserData() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return userDocExists() ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data : {};
     }
     
     function isSuperAdmin() {
-      return isAuthenticated() && getUserData().role in ['SUPERADMIN', 'superadmin'];
+      return isAuthenticated() && userDocExists() && getUserData().role in ['SUPERADMIN', 'superadmin'];
     }
     
     function isAdmin() {
-      return isAuthenticated() && (getUserData().role in ['ADMIN', 'SUPERADMIN', 'admin', 'superadmin']);
+      return isAuthenticated() && userDocExists() && (getUserData().role in ['ADMIN', 'SUPERADMIN', 'admin', 'superadmin']);
     }
     
     function isAdminForCity(city) {
@@ -32,14 +36,15 @@ service cloud.firestore {
       // Only the account owner or verified admins can read private user profiles
       allow read: if isOwner(userId) || isAdmin();
       
-      // User can create their initial document with default USER role; cannot set privileged roles or city
+      // User can create their initial document with default USER or DONOR role
       allow create: if isOwner(userId) && 
         (!('role' in request.resource.data) || request.resource.data.role in ['USER', 'DONOR', 'user', 'donor']) &&
-        !('assignedCity' in request.resource.data);
+        (!('assignedCity' in request.resource.data) || request.resource.data.assignedCity == '');
       
-      // Users can update their profile fields, but CANNOT change role, assignedCity, or emailVerified
+      // Users can update their profile fields, and promote themselves to DONOR; CANNOT elevate to ADMIN/SUPERADMIN
       allow update: if (isOwner(userId) && 
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'assignedCity', 'emailVerified']))
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['assignedCity', 'emailVerified']) &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']) || request.resource.data.role in ['USER', 'DONOR', 'user', 'donor']))
         || isSuperAdmin();
         
       allow delete: if isSuperAdmin();

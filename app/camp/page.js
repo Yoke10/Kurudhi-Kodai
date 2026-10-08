@@ -291,6 +291,7 @@ const HostBloodCamp = () => {
   const [currentStep, setCurrentStep] = useState(0);
   const [submitStatus, setSubmitStatus] = useState({ type: '', message: '' });
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [touched, setTouched] = useState({});
   const [formData, setFormData] = useState({
     // Step 1: Organizer Details
     organizationType: '',
@@ -748,14 +749,14 @@ const HostBloodCamp = () => {
                     <div className="text-red-900">{formData.campCountry}</div>
                     
                     <div className="text-red-600">Camp Start:</div>
-<div className="text-red-900">
-  {new Date(formData.campStart).toLocaleString()}
-</div>
+                    <div className="text-red-900">
+                      {formData.campStart ? new Date(formData.campStart).toLocaleString() : 'Not set'}
+                    </div>
 
-<div className="text-red-600">Camp End:</div>
-<div className="text-red-900">
-  {new Date(formData.campEnd).toLocaleString()}
-</div>
+                    <div className="text-red-600">Camp End:</div>
+                    <div className="text-red-900">
+                      {formData.campEnd ? new Date(formData.campEnd).toLocaleString() : 'Not set'}
+                    </div>
 
 
 

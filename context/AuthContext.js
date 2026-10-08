@@ -84,34 +84,18 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
-  // Helper to fetch donor record (checks donors/{uid} first, falls back to legacy where Email == user.email)
+  // Helper to fetch donor record (direct UID lookup conforming to security rules)
   const fetchDonorRecord = useCallback(async (firebaseUser) => {
     if (!firebaseUser) return null;
     try {
-      // 1. Direct UID lookup (new standard)
       const directRef = doc(db, 'donors', firebaseUser.uid);
       const directSnap = await getDoc(directRef);
       if (directSnap.exists()) {
         return { id: directSnap.id, ...directSnap.data() };
       }
-
-      // 2. Legacy lookup by email
-      if (firebaseUser.email) {
-        const q = query(collection(db, 'donors'), where('Email', '==', firebaseUser.email));
-        const snap = await getDocs(q);
-        if (!snap.empty) {
-          return { id: snap.docs[0].id, ...snap.docs[0].data() };
-        }
-        // Also check camelCase email
-        const q2 = query(collection(db, 'donors'), where('email', '==', firebaseUser.email));
-        const snap2 = await getDocs(q2);
-        if (!snap2.empty) {
-          return { id: snap2.docs[0].id, ...snap2.docs[0].data() };
-        }
-      }
       return null;
     } catch (err) {
-      console.error('Error fetching donor profile:', err);
+      console.warn('Donor profile lookup note:', err?.message || err);
       return null;
     }
   }, []);
@@ -232,6 +216,11 @@ export function AuthProvider({ children }) {
     }
   };
 
+  const resendVerificationEmail = async () => {
+    if (!auth.currentUser) throw new Error('No user is currently signed in.');
+    await sendEmailVerification(auth.currentUser);
+  };
+
   const logout = async () => {
     try {
       await signOut(auth);
@@ -260,6 +249,7 @@ export function AuthProvider({ children }) {
         googleSignIn,
         logout,
         refreshUserProfile,
+        resendVerificationEmail,
       }}
     >
       {children}

@@ -227,10 +227,10 @@ export default function BecomeDonor() {
       await setDoc(doc(db, 'donors', user.uid), donorRecord);
 
       // 2. Elevate user role to canonical uppercase DONOR in users/{uid}
-      await updateDoc(doc(db, 'users', user.uid), {
+      await setDoc(doc(db, 'users', user.uid), {
         role: ROLES.DONOR,
         updatedAt: serverTimestamp(),
-      });
+      }, { merge: true });
 
       // 3. Hydrate state
       await refreshUserProfile();

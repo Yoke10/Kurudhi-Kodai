@@ -12,7 +12,8 @@ import { useAuth } from '@/context/AuthContext';
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { calculateDonorCooldown } from '@/lib/matchingEngine';
-import { UserCircle, Shield, Droplets, Calendar, MapPin, CheckCircle, Clock } from 'lucide-react';
+import { ROLES, normalizeRole } from '@/lib/roles';
+import { UserCircle, Shield, Droplets, Calendar, MapPin, CheckCircle, Clock, HeartHandshake, PlusCircle } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
@@ -29,7 +30,7 @@ const tamilNaduCities = [
 ];
 
 export default function ProfilePage() {
-  const { user, donorProfile, refreshUserProfile } = useAuth();
+  const { user, userRole, donorProfile, isDonor, refreshUserProfile } = useAuth();
   const router = useRouter();
   const [donorData, setDonorData] = useState(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -163,74 +164,54 @@ export default function ProfilePage() {
     );
   }
 
-  if (!donorData) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex flex-col">
-        <Navbar />
-        <div className="flex-1 flex items-center justify-center px-4">
-          <Card className="w-full max-w-md p-6 text-center border-2 border-red-100 shadow-lg rounded-2xl">
-            <CardHeader>
-              <div className="w-20 h-20 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
-                <UserCircle className="w-12 h-12" />
-              </div>
-              <CardTitle className="text-2xl font-bold text-gray-800">No Donor Profile</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-gray-600 mb-6">
-                You have not registered as a blood donor yet. Register now to help save lives in your city.
-              </p>
-              <Button
-                onClick={() => router.push('/newdonor')}
-                className="w-full bg-red-600 hover:bg-red-700 text-white rounded-lg py-3 font-semibold"
-              >
-                Become a Donor
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    );
-  }
-
-  const { isEligible, remainingDays } = calculateDonorCooldown(donorData.lastDonationAt);
+  const currentRole = normalizeRole(userRole);
+  const { isEligible, remainingDays } = calculateDonorCooldown(donorData?.lastDonationAt);
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <Navbar />
 
       <main className="flex-1 max-w-4xl mx-auto px-4 py-8 w-full">
-        <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div>
-            <h1 className="text-3xl font-extrabold text-gray-800">Donor Profile</h1>
-            <p className="text-sm text-gray-500 mt-1">
-              Manage your contact details, city, and donation availability status
-            </p>
-          </div>
-          <div>
-            {!isEditing ? (
-              <Button
-                onClick={() => setIsEditing(true)}
-                className="bg-red-600 hover:bg-red-700 text-white font-medium px-5 py-2 rounded-lg shadow-sm"
-              >
-                Edit Profile
-              </Button>
-            ) : (
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() => setIsEditing(false)}
-                  className="border-gray-300 text-gray-700 hover:bg-gray-100 rounded-lg"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleSave}
-                  className="bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg"
-                >
-                  Save Changes
-                </Button>
+        {/* Account Role & Capability Overview Header */}
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 mb-6">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div>
+              <span className="text-xs font-bold text-red-600 tracking-wider uppercase">User Account</span>
+              <h1 className="text-2xl font-black text-gray-900 mt-0.5">My Profile</h1>
+              <p className="text-xs text-gray-500 mt-1">
+                Signed in as <strong className="text-gray-800 font-semibold">{user?.email}</strong>
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-4 pt-3 sm:pt-0 border-t sm:border-t-0 border-gray-100">
+              <div className="bg-gray-50 rounded-xl px-4 py-2.5 border border-gray-200 text-center min-w-[130px]">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">
+                  Account Role
+                </span>
+                <span className={`inline-block mt-0.5 px-2.5 py-0.5 rounded-full text-xs font-black uppercase tracking-wide border ${
+                  currentRole === ROLES.SUPERADMIN
+                    ? 'bg-purple-100 text-purple-800 border-purple-200'
+                    : currentRole === ROLES.ADMIN
+                    ? 'bg-red-100 text-red-800 border-red-200'
+                    : 'bg-slate-100 text-slate-800 border-slate-200'
+                }`}>
+                  {currentRole}
+                </span>
               </div>
-            )}
+
+              <div className="bg-gray-50 rounded-xl px-4 py-2.5 border border-gray-200 text-center min-w-[140px]">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">
+                  Donor Status
+                </span>
+                <span className={`inline-block mt-0.5 px-2.5 py-0.5 rounded-full text-xs font-black tracking-wide border ${
+                  donorData
+                    ? 'bg-green-100 text-green-800 border-green-200'
+                    : 'bg-amber-100 text-amber-800 border-amber-200'
+                }`}>
+                  {donorData ? 'Registered Donor' : 'Not Registered'}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -241,6 +222,61 @@ export default function ProfilePage() {
             </AlertDescription>
           </Alert>
         )}
+
+        {!donorData ? (
+          <Card className="border border-gray-200 shadow-sm bg-white rounded-2xl p-8 text-center max-w-xl mx-auto my-8">
+            <div className="w-16 h-16 bg-red-50 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 border border-red-100">
+              <HeartHandshake className="w-8 h-8" />
+            </div>
+            <h2 className="text-xl font-black text-gray-900 mb-2">No Donor Profile Registered</h2>
+            <p className="text-sm text-gray-600 mb-6 leading-relaxed">
+              You are signed in with account role <strong className="font-bold text-gray-800">{currentRole}</strong>.
+              Registering as a blood donor activates matching capabilities for your profile while preserving your <strong className="font-bold text-gray-800">{currentRole}</strong> administrative status.
+            </p>
+            <Button
+              onClick={() => router.push('/newdonor')}
+              className="bg-red-600 hover:bg-red-700 text-white rounded-xl py-3 px-6 font-bold shadow-sm"
+            >
+              <PlusCircle className="w-4 h-4 mr-2" />
+              Register as Blood Donor
+            </Button>
+          </Card>
+        ) : (
+          <>
+            <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div>
+                <h2 className="text-2xl font-extrabold text-gray-800">Donor Profile</h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  Manage your contact details, city, and donation availability status
+                </p>
+              </div>
+              <div>
+                {!isEditing ? (
+                  <Button
+                    onClick={() => setIsEditing(true)}
+                    className="bg-red-600 hover:bg-red-700 text-white font-medium px-5 py-2 rounded-lg shadow-sm"
+                  >
+                    Edit Profile
+                  </Button>
+                ) : (
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => setIsEditing(false)}
+                      className="border-gray-300 text-gray-700 hover:bg-gray-100 rounded-lg"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={handleSave}
+                      className="bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg"
+                    >
+                      Save Changes
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {/* Left Column: Quick Status Card */}
@@ -466,6 +502,8 @@ export default function ProfilePage() {
             </Card>
           </div>
         </div>
+        </>
+        )}
       </main>
     </div>
   );

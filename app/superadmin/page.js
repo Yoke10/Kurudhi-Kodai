@@ -123,7 +123,7 @@ export default function SuperAdminDashboard() {
       filename = 'admins.xlsx';
       console.log('Fetching admins for export...');
       try {
-        const adminsQuery = query(collection(db, 'users'), where('role', 'in', ['admin', 'superadmin']));
+        const adminsQuery = query(collection(db, 'users'), where('role', 'in', ['ADMIN', 'SUPERADMIN', 'admin', 'superadmin']));
         const querySnapshot = await getDocs(adminsQuery);
         const adminData = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         console.log('Fetched admin data:', adminData);
@@ -1093,7 +1093,7 @@ export default function SuperAdminDashboard() {
   }
 
   // If not authorized, show error message
-  if (!userRole || userRole !== 'superadmin') {
+  if (!userRole || !isSuperAdminRole(userRole)) {
     return (
       <>
         <Navbar />
@@ -1900,9 +1900,9 @@ export default function SuperAdminDashboard() {
                     ).map(user => (
                       <tr key={user.id} className="border-b hover:bg-gray-50 transition">
                         <td className="px-6 py-4">{user.email}</td>
-                        <td className="px-6 py-4">{user.role || 'user'}</td>
+                        <td className="px-6 py-4">{normalizeRole(user.role)}</td>
                         <td className="px-6 py-4">
-                          {user.role === 'admin' ? user.assignedCity || 'None assigned' : '-'}
+                          {normalizeRole(user.role) === ROLES.ADMIN ? user.assignedCity || 'None assigned' : '-'}
                         </td>
                         <td className="px-6 py-4">
                           <Button
@@ -1914,14 +1914,14 @@ export default function SuperAdminDashboard() {
                         </td>
                         <td className="px-6 py-4">
                           <div className="flex gap-2">
-                            {['user', 'admin', 'superadmin']
-                              .filter(role => role !== (user.role || 'user'))
+                            {[ROLES.USER, ROLES.ADMIN, ROLES.SUPERADMIN]
+                              .filter(role => role !== normalizeRole(user.role))
                               .map(role => (
                                 <Button
                                   key={role}
                                   onClick={() => handleRoleChangeClick(user.id, user.email, role)}
                                 >
-                                  {`Make ${role.charAt(0).toUpperCase() + role.slice(1)}`}
+                                  {`Make ${role.charAt(0) + role.slice(1).toLowerCase()}`}
                                 </Button>
                               ))}
                           </div>
@@ -2071,7 +2071,7 @@ export default function SuperAdminDashboard() {
             </p>
             
             {/* Add city selection for admin role */}
-            {roleConfirmModal.newRole === 'admin' && (
+            {normalizeRole(roleConfirmModal.newRole) === ROLES.ADMIN && (
               <div className="mt-4">
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Assign City
@@ -2100,14 +2100,14 @@ export default function SuperAdminDashboard() {
               </Button>
               <Button 
                 onClick={() => {
-                  if (roleConfirmModal.newRole === 'admin' && !selectedCity) {
+                  if (normalizeRole(roleConfirmModal.newRole) === ROLES.ADMIN && !selectedCity) {
                     toast.error('Please select a city for admin');
                     return;
                   }
                   handleSetRole(roleConfirmModal.userId, roleConfirmModal.email, roleConfirmModal.newRole, selectedCity);
                   setRoleConfirmModal({ ...roleConfirmModal, open: false });
                 }}
-                disabled={roleConfirmModal.newRole === 'admin' && !selectedCity}
+                disabled={normalizeRole(roleConfirmModal.newRole) === ROLES.ADMIN && !selectedCity}
               >
                 Confirm
               </Button>

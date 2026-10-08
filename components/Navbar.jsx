@@ -54,13 +54,23 @@ const Navbar = () => {
           </div>
 
           {/* Desktop Navigation Links */}
-          <div className="hidden md:flex items-center space-x-2">
+          <div className="hidden md:flex items-center space-x-1 lg:space-x-2">
             <Link href="/" className={navLinkClass("/")}>
               Home
             </Link>
             <Link href="/dashboard" className={navLinkClass("/dashboard")}>
-              Donor Portal
+              {isDonor ? "Donor Dashboard" : "Donor Portal"}
             </Link>
+            {isAdmin && (
+              <Link href="/admin" className={navLinkClass("/admin")}>
+                Admin Dashboard
+              </Link>
+            )}
+            {isSuperAdmin && (
+              <Link href="/superadmin" className={navLinkClass("/superadmin")}>
+                Superadmin Dashboard
+              </Link>
+            )}
             <Link href="/needdonor" className={navLinkClass("/needdonor")}>
               Need Blood
             </Link>
@@ -93,15 +103,28 @@ const Navbar = () => {
                   </button>
 
                   {showProfileDropdown && (
-                    <div className="absolute right-0 mt-2 w-52 bg-white rounded-xl shadow-xl border border-gray-100 py-1 z-50 animate-in fade-in zoom-in-95 duration-100">
+                    <div className="absolute right-0 mt-2 w-56 bg-white rounded-xl shadow-xl border border-gray-100 py-1 z-50 animate-in fade-in zoom-in-95 duration-100">
                       <div className="px-4 py-2 border-b border-gray-100">
                         <p className="text-xs text-gray-500">Signed in as</p>
                         <p className="text-sm font-bold text-gray-900 truncate">{user.email}</p>
-                        {userRole && (
-                          <span className="inline-block mt-1 px-2 py-0.5 text-[10px] uppercase font-bold tracking-wider rounded bg-red-100 text-red-800">
-                            {userRole}
-                          </span>
-                        )}
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                          {userRole && (
+                            <span className={`inline-block px-2 py-0.5 text-[10px] uppercase font-bold tracking-wider rounded ${
+                              isSuperAdmin
+                                ? 'bg-purple-100 text-purple-800'
+                                : isAdmin
+                                ? 'bg-red-100 text-red-800'
+                                : 'bg-gray-100 text-gray-800'
+                            }`}>
+                              Role: {userRole}
+                            </span>
+                          )}
+                          {isDonor && (
+                            <span className="inline-block px-2 py-0.5 text-[10px] uppercase font-bold tracking-wider rounded bg-green-100 text-green-800">
+                              Donor
+                            </span>
+                          )}
+                        </div>
                       </div>
 
                       <Link
@@ -113,7 +136,16 @@ const Navbar = () => {
                         My Profile
                       </Link>
 
-                      {!isDonor && (
+                      {isDonor ? (
+                        <Link
+                          href="/dashboard"
+                          onClick={() => setShowProfileDropdown(false)}
+                          className="flex items-center px-4 py-2.5 text-sm text-gray-700 hover:bg-red-50 hover:text-red-700 transition-colors font-medium"
+                        >
+                          <HeartHandshake className="w-4 h-4 mr-2 text-red-500" />
+                          Donor Dashboard
+                        </Link>
+                      ) : (
                         <Link
                           href="/newdonor"
                           onClick={() => setShowProfileDropdown(false)}
@@ -131,7 +163,7 @@ const Navbar = () => {
                           className="flex items-center px-4 py-2.5 text-sm text-gray-700 hover:bg-red-50 hover:text-red-700 transition-colors"
                         >
                           <Shield className="w-4 h-4 mr-2 text-red-500" />
-                          Admin Console
+                          Admin Dashboard
                         </Link>
                       )}
 
@@ -142,7 +174,7 @@ const Navbar = () => {
                           className="flex items-center px-4 py-2.5 text-sm text-gray-700 hover:bg-red-50 hover:text-red-700 transition-colors font-semibold"
                         >
                           <Shield className="w-4 h-4 mr-2 text-purple-600" />
-                          Super Admin
+                          Superadmin Dashboard
                         </Link>
                       )}
 
@@ -191,8 +223,18 @@ const Navbar = () => {
               Home
             </Link>
             <Link href="/dashboard" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/dashboard")}>
-              Donor Portal
+              {isDonor ? "Donor Dashboard" : "Donor Portal"}
             </Link>
+            {isAdmin && (
+              <Link href="/admin" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/admin")}>
+                Admin Dashboard
+              </Link>
+            )}
+            {isSuperAdmin && (
+              <Link href="/superadmin" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/superadmin")}>
+                Superadmin Dashboard
+              </Link>
+            )}
             <Link href="/needdonor" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/needdonor")}>
               Need Blood
             </Link>
@@ -213,14 +255,19 @@ const Navbar = () => {
                 <Link href="/profile" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/profile")}>
                   My Profile
                 </Link>
+                {!isDonor && (
+                  <Link href="/newdonor" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/newdonor")}>
+                    Register as Donor
+                  </Link>
+                )}
                 {isAdmin && (
                   <Link href="/admin" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/admin")}>
-                    Admin Console
+                    Admin Dashboard
                   </Link>
                 )}
                 {isSuperAdmin && (
                   <Link href="/superadmin" onClick={() => setIsOpen(false)} className={mobileNavLinkClass("/superadmin")}>
-                    Super Admin Console
+                    Superadmin Dashboard
                   </Link>
                 )}
                 <button

@@ -13,7 +13,6 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { doc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-import { ROLES } from '@/lib/roles';
 import { Shield, Heart, CheckCircle2 } from 'lucide-react';
 
 const tamilNaduCities = [
@@ -223,16 +222,11 @@ export default function BecomeDonor() {
         ResidentCity: formData.residentCity || formData.permanentCity,
       };
 
-      // 1. Save directly under canonical donors/{uid}
+      // 1. Save donor record directly under canonical donors/{uid}
+      // Note: User system role (USER, ADMIN, SUPERADMIN), assignedCity, and emailVerified are NEVER modified.
       await setDoc(doc(db, 'donors', user.uid), donorRecord);
 
-      // 2. Elevate user role to canonical uppercase DONOR in users/{uid}
-      await setDoc(doc(db, 'users', user.uid), {
-        role: ROLES.DONOR,
-        updatedAt: serverTimestamp(),
-      }, { merge: true });
-
-      // 3. Hydrate state
+      // 2. Hydrate state with donor profile capability
       await refreshUserProfile();
 
       setSubmitStatus({

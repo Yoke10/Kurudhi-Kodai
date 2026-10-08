@@ -5,6 +5,7 @@ import { Eye, Mail, Phone, User, Calendar, Shield, MessageCircle, CheckCircle, A
 import { doc, updateDoc, onSnapshot, collection, query, where } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { useAuth } from '@/context/AuthContext';
+import { isAdminRole } from '@/lib/roles';
 import Navbar from '@/components/Navbar';
 import { Button } from '@/components/ui/button';
 import Link from 'next/link';
@@ -20,7 +21,7 @@ export default function SupportPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
 
-  const isAdmin = userRole === 'admin' || userRole === 'superadmin';
+  const isAdmin = isAdminRole(userRole);
 
   useEffect(() => {
     if (authLoading) return;

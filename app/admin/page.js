@@ -296,7 +296,7 @@ export default function AdminDashboard() {
   useEffect(() => {
     if (!user) return;
     
-    if (userRole === 'admin' || userRole === 'superadmin') {
+    if (isAdminRole(userRole)) {
       fetchRequests();
     }
   }, [userRole, assignedCity, fetchRequests]);

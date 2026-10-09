@@ -9,6 +9,7 @@ import { isAdminRole } from '@/lib/roles';
 import Navbar from '@/components/Navbar';
 import { Button } from '@/components/ui/button';
 import Link from 'next/link';
+import { toast } from 'react-hot-toast';
 
 export default function SupportPage() {
   const { user, userRole, loading: authLoading } = useAuth();
@@ -86,9 +87,10 @@ export default function SupportPage() {
           status: 'resolved',
         }));
       }
+      toast.success('Support ticket marked as resolved.');
     } catch (err) {
       console.error('Error updating support request:', err);
-      alert('Failed to update status. Please try again.');
+      toast.error('Failed to update status. Please try again.');
     } finally {
       setUpdating(false);
     }

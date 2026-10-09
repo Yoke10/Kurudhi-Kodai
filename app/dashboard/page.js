@@ -12,76 +12,39 @@ import {
   getDocs,
   onSnapshot,
   query,
-  updateDoc,
   where,
-  runTransaction,
-  increment,
-  serverTimestamp,
-  addDoc
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { isBloodGroupCompatible } from '@/lib/bloodCompatibility';
 import { calculateDonorCooldown } from '@/lib/matchingEngine';
-import { generateSecure4DigitOtp, hashOtp, verifyOtpAttempt, OTP_EXPIRY_MINUTES, MAX_OTP_ATTEMPTS } from '@/lib/otpService';
-import { logAuditEvent, AUDIT_ACTIONS } from '@/lib/auditLogger';
-import { sendNotification, NOTIFICATION_TYPES } from '@/lib/notifications';
+import {
+  isRequestActive,
+  isRequestFullyCompleted,
+  isRequestCancelled,
+} from '@/lib/requestStateMachine';
+import {
+  isDonationActive,
+  isDonationCompleted,
+  isDonationCancelled,
+} from '@/lib/donationStateMachine';
+import {
+  acceptDonationPledge,
+  cancelDonorDonation,
+  COMMITMENT_ERROR_MSG,
+} from '@/lib/donationService';
+import DualOtpVerification from '@/components/donations/DualOtpVerification';
+import StatusBadge from '@/components/ui/StatusBadge';
 import {
   AlertCircle, Check, ChevronDown, Clock, Droplet, Hospital,
   Info, MapPin, Share2, Shield, HeartHandshake, X
 } from 'lucide-react';
 
-// Secure 4-Digit OTP Input
-function OtpInput({ length = 4, onChange, inputClassName = "w-12 h-12 text-center text-xl font-bold border-2 border-red-300 rounded-xl bg-white text-gray-900 shadow-sm focus:border-red-600 focus:outline-none" }) {
-  const [otp, setOtp] = useState(new Array(length).fill(""));
-  const inputRefs = useRef([]);
-
-  useEffect(() => {
-    onChange(otp.join(""));
-  }, [otp, onChange]);
-
-  const handleChange = (e, index) => {
-    const value = e.target.value.replace(/\D/g, "");
-    if (!value && value !== "") return;
-
-    const newOtp = [...otp];
-    newOtp[index] = value.substring(value.length - 1);
-    setOtp(newOtp);
-
-    if (value && index < length - 1) {
-      inputRefs.current[index + 1]?.focus();
-    }
-  };
-
-  const handleKeyDown = (e, index) => {
-    if (e.key === "Backspace" && !otp[index] && index > 0) {
-      inputRefs.current[index - 1]?.focus();
-    }
-  };
-
-  return (
-    <div className="flex justify-center gap-3">
-      {otp.map((digit, index) => (
-        <input
-          key={index}
-          ref={(el) => (inputRefs.current[index] = el)}
-          type="text"
-          inputMode="numeric"
-          maxLength={1}
-          className={inputClassName}
-          value={digit}
-          onChange={(e) => handleChange(e, index)}
-          onKeyDown={(e) => handleKeyDown(e, index)}
-          autoFocus={index === 0}
-        />
-      ))}
-    </div>
-  );
-}
 
 export default function DashboardPage() {
   const { user, donorProfile, isDonor } = useAuth();
   const [requests, setRequests] = useState([]);
   const [userDonations, setUserDonations] = useState([]);
+  const [activeCommitment, setActiveCommitment] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('active'); // 'active' | 'mytype' | 'completed'
   const [stats, setStats] = useState({
@@ -106,40 +69,49 @@ export default function DashboardPage() {
     return () => unsubscribe();
   }, []);
 
-  // Fetch user donations efficiently without looping full collection
+  // Listen to donor's active commitment document in real-time
   useEffect(() => {
-    if (!user) return;
-
-    // Listen to donations where user is donor
-    let active = true;
-    const fetchDonations = async () => {
-      try {
-        const found = [];
-        // Check top requests currently active or user's active pledges
-        for (const req of requests) {
-          const donRef = collection(db, "requests", req.id, "donations");
-          const q = query(donRef, where("donorId", "==", user.uid));
-          const snap = await getDocs(q);
-          snap.forEach(d => {
-            found.push({ id: d.id, requestId: req.id, ...d.data() });
-          });
-        }
-        if (active) {
-          setUserDonations(found);
-        }
-      } catch (e) {
-        console.warn("Error fetching user donations:", e);
-      }
-    };
-
-    if (requests.length > 0) {
-      fetchDonations();
+    if (!user?.uid) {
+      setActiveCommitment(null);
+      return;
     }
+    const unsub = onSnapshot(doc(db, "donorCommitments", user.uid), (docSnap) => {
+      if (docSnap.exists() && docSnap.data().status === 'ACTIVE') {
+        setActiveCommitment({ id: docSnap.id, ...docSnap.data() });
+      } else {
+        setActiveCommitment(null);
+      }
+    }, (err) => {
+      console.warn("Notice listening to donorCommitments:", err);
+    });
 
-    return () => { active = false; };
-  }, [user, requests.length]);
+    return () => unsub();
+  }, [user?.uid]);
 
-  // Compute stats
+  // Fetch user donations efficiently
+  const refreshUserDonations = async () => {
+    if (!user?.uid || requests.length === 0) return;
+    try {
+      const found = [];
+      for (const req of requests) {
+        const donRef = collection(db, "requests", req.id, "donations");
+        const q = query(donRef, where("donorId", "==", user.uid));
+        const snap = await getDocs(q);
+        snap.forEach(d => {
+          found.push({ id: d.id, requestId: req.id, ...d.data() });
+        });
+      }
+      setUserDonations(found);
+    } catch (e) {
+      console.warn("Error fetching user donations:", e);
+    }
+  };
+
+  useEffect(() => {
+    refreshUserDonations();
+  }, [user?.uid, requests.length]);
+
+  // Compute stats with authoritative helpers
   useEffect(() => {
     let activeCount = 0;
     let eligibleCount = 0;
@@ -148,22 +120,21 @@ export default function DashboardPage() {
     const donorBlood = donorProfile?.bloodGroup || donorProfile?.BloodGroup;
 
     requests.forEach(req => {
-      const status = (req.status || req.Verified || '').toLowerCase();
-      const isActive = status === 'active' || status === 'accepted' || status === 'received';
-
-      if (isActive) {
+      if (isRequestActive(req)) {
         activeCount++;
         const reqBlood = req.bloodGroup || req.BloodGroup;
         const anyAccepted = req.anyBloodGroupAccepted || req.AnyBloodGroupAccepted || false;
 
         if (donorBlood && isBloodGroupCompatible(donorBlood, reqBlood, anyAccepted)) {
           eligibleCount++;
-          totalEligibleUnits += parseInt(req.unitsNeeded || req.UnitsNeeded || 1, 10);
+          const needed = parseInt(req.unitsNeeded || req.UnitsNeeded || 1, 10);
+          const donated = parseInt(req.unitsDonated || req.UnitsDonated || 0, 10);
+          totalEligibleUnits += Math.max(0, needed - donated);
         }
       }
     });
 
-    const completed = userDonations.filter(d => d.completed || d.status === 'DONATION_COMPLETED').length;
+    const completed = userDonations.filter(d => isDonationCompleted(d)).length;
 
     setStats({
       activeRequests: activeCount,
@@ -176,19 +147,17 @@ export default function DashboardPage() {
   const donorBlood = donorProfile?.bloodGroup || donorProfile?.BloodGroup;
   const { isEligible, remainingDays } = calculateDonorCooldown(donorProfile?.lastDonationAt || donorProfile?.lastDonationDate);
 
-  // Filter requests for tabs
+  // Filter requests for tabs strictly using canonical lifecycle states
   const filteredRequests = requests.filter(request => {
-    const status = (request.status || request.Verified || '').toLowerCase();
-    const isCompleted = status === 'completed' || status === 'fulfilled';
-    const isActive = status === 'active' || status === 'accepted' || status === 'received' || status === 'matching' || status === 'partially_fulfilled';
+    const isActive = isRequestActive(request);
+    const isCompleted = isRequestFullyCompleted(request);
 
     if (activeTab === 'active') {
       return isActive;
     }
     if (activeTab === 'completed') {
-      // User contributed to this request or it is completed
-      const donationReqIds = userDonations.map(d => d.requestId);
-      return donationReqIds.includes(request.id) || isCompleted;
+      // Completed Requests MUST only contain requests that have met full canonical completion!
+      return isCompleted;
     }
     if (activeTab === 'mytype') {
       if (!donorBlood || !isActive) return false;
@@ -241,6 +210,24 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* Active Commitment Notice Banner */}
+        {activeCommitment && (
+          <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 text-sm flex items-center justify-between gap-3 shadow-sm">
+            <div className="flex items-center gap-3">
+              <Shield className="w-5 h-5 text-blue-600 flex-shrink-0" />
+              <div>
+                <p className="font-bold">Active Donation Commitment in Progress</p>
+                <p className="text-xs text-blue-800">
+                  You are pledged to an active donation for Patient <strong>{activeCommitment.patientName || 'Blood Request'}</strong>. You cannot accept other requests until this is completed or cancelled.
+                </p>
+              </div>
+            </div>
+            <span className="text-[11px] font-bold uppercase tracking-wider bg-blue-200/70 text-blue-900 px-2.5 py-1 rounded-full">
+              Pledged
+            </span>
+          </div>
+        )}
+
         {/* Statistics Cards */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm">
@@ -285,7 +272,7 @@ export default function DashboardPage() {
               activeTab === 'completed' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-800'
             }`}
           >
-            Completed
+            Completed Requests
           </button>
         </div>
 
@@ -306,6 +293,8 @@ export default function DashboardPage() {
                 isEligible={isEligible}
                 remainingDays={remainingDays}
                 userDonation={userDonations.find(d => d.requestId === req.id)}
+                activeCommitment={activeCommitment}
+                onDonationChange={refreshUserDonations}
               />
             ))}
           </div>
@@ -322,271 +311,120 @@ export default function DashboardPage() {
 }
 
 // Subcomponent: Individual Blood Request Card
-function DonorRequestCard({ request, user, donorProfile, isEligible, remainingDays, userDonation }) {
+function DonorRequestCard({
+  request,
+  user,
+  donorProfile,
+  isEligible,
+  remainingDays,
+  userDonation,
+  activeCommitment,
+  onDonationChange,
+}) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [donation, setDonation] = useState(userDonation || null);
-  const [enteredOtp, setEnteredOtp] = useState("");
-  const [donorVerbalOtp, setDonorVerbalOtp] = useState("");
-  const [isGeneratingOtp, setIsGeneratingOtp] = useState(false);
-  const [otpError, setOtpError] = useState("");
-  const [isVerifying, setIsVerifying] = useState(false);
+  const [isPledging, setIsPledging] = useState(false);
+  const [pledgeError, setPledgeError] = useState("");
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
+  const [isCancelling, setIsCancelling] = useState(false);
 
   const reqBlood = request.bloodGroup || request.BloodGroup;
   const donorBlood = donorProfile?.bloodGroup || donorProfile?.BloodGroup;
   const anyAcc = request.anyBloodGroupAccepted || request.AnyBloodGroupAccepted || false;
   const isCompatible = donorBlood && isBloodGroupCompatible(donorBlood, reqBlood, anyAcc);
 
-  // Sync state if userDonation changes
+  // Sync state if userDonation changes from parent
   useEffect(() => {
     if (userDonation) setDonation(userDonation);
   }, [userDonation]);
 
-  // PLEDGE DONATION: Initial record created; OTPs generated via secure server API
+  // Real-time listener for donations pledged by current user on this request
+  useEffect(() => {
+    if (!request?.id || !user?.uid) return;
+    const donCol = collection(db, "requests", request.id, "donations");
+    const q1 = query(donCol, where("donorId", "==", user.uid));
+    const unsub = onSnapshot(q1, (snap) => {
+      const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      docs.sort((a, b) => {
+        const tA = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0;
+        const tB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
+        return tB - tA;
+      });
+      // Pick active donation if any, else latest donation
+      const activeDoc = docs.find(d => isDonationActive(d));
+      setDonation(activeDoc || docs[0] || null);
+    }, (err) => {
+      console.warn("DonorRequestCard donations listener notice:", err);
+    });
+    return () => unsub();
+  }, [request?.id, user?.uid]);
+
+  // PLEDGE DONATION: Atomically verified and recorded with donor commitment lock
   const handlePledgeDonation = async () => {
     if (!user || !donorProfile) return;
     if (!isEligible) {
-      alert(`You are currently in cooldown for ${remainingDays} more days.`);
+      setPledgeError(`You are currently in cooldown for ${remainingDays} more days.`);
+      return;
+    }
+    if (activeCommitment && activeCommitment.requestId !== request.id) {
+      setPledgeError(COMMITMENT_ERROR_MSG);
       return;
     }
 
+    setIsPledging(true);
+    setPledgeError("");
     try {
-      // Generate donor's 4-digit verbal code (SHA-256 hash stored in Firestore, plaintext only in local state)
-      const rawDonorOtp = generateSecure4DigitOtp();
-      const donorOtpHash = await hashOtp(rawDonorOtp);
-      const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
-
-      const donationData = {
-        requestId: request.id,
-        donorId: user.uid,
+      const result = await acceptDonationPledge({
+        request,
         donorUid: user.uid,
-        donorEmail: user.email,
-        donorName: donorProfile.name || donorProfile.Name || 'Anonymous Donor',
-        donorBloodGroup: donorBlood,
-        donorOtpHash,
-        donorOtpExpiresAt: expiresAt,
-        donorOtpAttemptsRemaining: MAX_OTP_ATTEMPTS,
-        donorOtpVerified: false,
-        requesterOtpVerified: false,
-        completed: false,
-        status: 'OTP_PENDING',
-        createdAt: serverTimestamp(),
-      };
+        donorProfile,
+        userEmail: user.email,
+      });
 
-      const docRef = await addDoc(collection(db, "requests", request.id, "donations"), donationData);
-      setDonation({ id: docRef.id, ...donationData });
-      setDonorVerbalOtp(rawDonorOtp);
-
-      // In-App Notification to Request Creator
-      if (request.createdByUid || request.uuid) {
-        await sendNotification({
-          recipientUid: request.createdByUid || request.uuid,
-          type: NOTIFICATION_TYPES.DONOR_ACCEPTED,
-          title: 'Donor Matched for Your Request!',
-          message: `${donorProfile.name || 'A donor'} has pledged to donate ${reqBlood} blood for ${request.patientName || request.PatientName}.`,
-          requestId: request.id,
-          donationId: docRef.id,
-        }).catch(e => console.warn("Notice sending notification:", e));
-      }
-
-      await logAuditEvent({
-        action: AUDIT_ACTIONS.DONOR_ACCEPTED,
-        actorUid: user.uid,
-        entityType: 'donation',
-        entityId: docRef.id,
-        metadata: { requestId: request.id },
-      }).catch(e => console.warn("Notice logging audit:", e));
-
+      setDonation(result.donation);
+      if (onDonationChange) onDonationChange();
     } catch (err) {
       console.error("Error creating donation pledge:", err);
-      alert("Unable to pledge donation. Please try again.");
-    }
-  };
-
-  // Generate or regenerate donor's 4-digit verbal code directly via authenticated session
-  const handleGenerateDonorOtp = async () => {
-    if (!donation || !user) return;
-    setIsGeneratingOtp(true);
-    setOtpError("");
-    try {
-      const rawDonorOtp = generateSecure4DigitOtp();
-      const donorOtpHash = await hashOtp(rawDonorOtp);
-      const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
-
-      await updateDoc(doc(db, "requests", request.id, "donations", donation.id), {
-        donorOtpHash,
-        donorOtpExpiresAt: expiresAt,
-        donorOtpAttemptsRemaining: MAX_OTP_ATTEMPTS,
-        donorOtpVerified: false,
-        status: 'OTP_PENDING',
-        updatedAt: serverTimestamp(),
-      });
-
-      setDonorVerbalOtp(rawDonorOtp);
-      setDonation(prev => ({
-        ...prev,
-        donorOtpHash,
-        donorOtpExpiresAt: expiresAt,
-        donorOtpAttemptsRemaining: MAX_OTP_ATTEMPTS,
-      }));
-    } catch (err) {
-      console.error('Error generating donor verbal OTP:', err);
-      alert(err.message || 'Error generating code. Please check permissions.');
+      setPledgeError(err.message || "Unable to pledge donation. Please try again.");
     } finally {
-      setIsGeneratingOtp(false);
+      setIsPledging(false);
     }
   };
 
-  // VERIFY REQUESTER'S OTP VIA AUTHENTICATED ATOMIC TRANSACTION
-  const handleVerifyOtp = async () => {
-    if (!donation || !enteredOtp) return;
-    setIsVerifying(true);
-    setOtpError("");
-
-    try {
-      const cleanOtp = enteredOtp.trim();
-      const storedHash = donation.requesterOtpHash;
-      const rawExpiry = donation.requesterOtpExpiresAt;
-      const attemptsRemaining = donation.requesterOtpAttemptsRemaining ?? MAX_OTP_ATTEMPTS;
-
-      if (!storedHash) {
-        setOtpError("The requester has not generated their confirmation code yet.");
-        setIsVerifying(false);
-        return;
-      }
-
-      const verifyResult = await verifyOtpAttempt({
-        enteredOtp: cleanOtp,
-        storedOtpOrHash: storedHash,
-        expiresAt: rawExpiry,
-        attemptsRemaining,
-        isHashed: true,
-      });
-
-      if (!verifyResult.success) {
-        await updateDoc(doc(db, "requests", request.id, "donations", donation.id), {
-          requesterOtpAttemptsRemaining: verifyResult.attemptsRemaining,
-          updatedAt: serverTimestamp(),
-        });
-        setOtpError(verifyResult.error || "Incorrect code");
-        setIsVerifying(false);
-        return;
-      }
-
-      // Code matched! Execute atomic transaction guaranteeing unitsDonated <= unitsNeeded
-      await runTransaction(db, async (transaction) => {
-        const reqRef = doc(db, "requests", request.id);
-        const donRef = doc(db, "requests", request.id, "donations", donation.id);
-
-        const reqSnap = await transaction.get(reqRef);
-        if (!reqSnap.exists()) {
-          throw new Error("Blood request not found");
-        }
-
-        const reqData = reqSnap.data();
-        const currentUnits = Number(reqData.unitsDonated || reqData.UnitsDonated || 0);
-        const unitsNeeded = Number(reqData.unitsNeeded || reqData.UnitsNeeded || 1);
-
-        if (currentUnits >= unitsNeeded) {
-          throw new Error("This blood request has already been fully fulfilled.");
-        }
-
-        const newUnits = currentUnits + 1;
-        const isFulfilled = newUnits >= unitsNeeded;
-
-        transaction.update(reqRef, {
-          unitsDonated: newUnits,
-          UnitsDonated: newUnits,
-          status: isFulfilled ? 'FULFILLED' : 'PARTIALLY_FULFILLED',
-          updatedAt: serverTimestamp(),
-        });
-
-        transaction.update(donRef, {
-          donorOtpVerified: true,
-          completed: true,
-          status: 'DONATION_COMPLETED',
-          completedAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      });
-
-      // Update donor cooldown in donors/{uid}
-      await updateDoc(doc(db, "donors", user.uid), {
-        lastDonationAt: serverTimestamp(),
-        availabilityStatus: 'COOLDOWN',
-        updatedAt: serverTimestamp(),
-      }).catch(err => console.warn("Notice updating cooldown:", err));
-
-      setDonation(prev => ({
-        ...prev,
-        donorOtpVerified: true,
-        completed: true,
-        status: 'DONATION_COMPLETED'
-      }));
-
-      // Notifications and audit
-      if (request.createdByUid || request.uuid) {
-        await sendNotification({
-          recipientUid: request.createdByUid || request.uuid,
-          type: NOTIFICATION_TYPES.DONATION_COMPLETED,
-          title: 'Blood Donation Verified and Complete!',
-          message: `Donation by ${donorProfile.name || 'Donor'} has been verified on-site.`,
-          requestId: request.id,
-          donationId: donation.id,
-        }).catch(e => console.warn("Notice sending notification:", e));
-      }
-
-      await logAuditEvent({
-        action: AUDIT_ACTIONS.DONATION_COMPLETED,
-        actorUid: user.uid,
-        entityType: 'donation',
-        entityId: donation.id,
-        metadata: { requestId: request.id },
-      }).catch(e => console.warn("Notice logging audit:", e));
-
-      alert("Donation successfully verified and recorded! Thank you for saving a life.");
-    } catch (err) {
-      console.error("Verification error:", err);
-      setOtpError(err.message || "Failed to finalize verification transaction.");
-    } finally {
-      setIsVerifying(false);
-    }
-  };
-
-
-
-  // CANCELLATION: Never delete historical documents, mark as CANCELLED
+  // CANCELLATION: Soft cancellation, releases commitment lock and reopens request if blood still needed
   const handleCancelDonation = async () => {
     if (!donation || !cancelReason.trim()) return;
+    setIsCancelling(true);
     try {
-      const donationRef = doc(db, "requests", request.id, "donations", donation.id);
-      await updateDoc(donationRef, {
+      await cancelDonorDonation({
+        requestId: request.id,
+        donationId: donation.id,
+        donorUid: user.uid,
+        reason: cancelReason.trim(),
+      });
+
+      setDonation(prev => prev ? ({
+        ...prev,
         status: 'CANCELLED',
-        cancelledBy: user.uid,
-        cancellationReason: cancelReason.trim(),
-        cancelledAt: serverTimestamp(),
-      });
-
-      await logAuditEvent({
-        action: AUDIT_ACTIONS.DONATION_CANCELLED,
-        actorUid: user.uid,
-        entityType: 'donation',
-        entityId: donation.id,
-        metadata: { reason: cancelReason },
-      });
-
-      setDonation(null);
+        cancelledByUid: user.uid,
+        cancellationReason: cancelReason.trim()
+      }) : null);
       setShowCancelModal(false);
       setCancelReason("");
-      alert("Donation pledge cancelled.");
+      if (onDonationChange) onDonationChange();
     } catch (e) {
       console.error("Cancellation error:", e);
-      alert("Failed to cancel pledge.");
+      setPledgeError(e.message || "Failed to cancel pledge.");
+    } finally {
+      setIsCancelling(false);
     }
   };
 
-  const isCompleted = donation?.completed || donation?.status === 'DONATION_COMPLETED';
+  const isCompleted = isDonationCompleted(donation);
+  const isCancelled = isDonationCancelled(donation);
+  const isActive = isDonationActive(donation);
+  const hasOtherActiveCommitment = Boolean(activeCommitment && activeCommitment.requestId !== request.id);
 
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden transition-all hover:shadow-md">
@@ -634,100 +472,89 @@ function DonorRequestCard({ request, user, donorProfile, isEligible, remainingDa
       {/* Action / State Area */}
       <div className="border-t border-gray-100 bg-gray-50/50 p-4">
         {isCompleted ? (
-          <div className="flex items-center justify-between text-green-800 bg-green-50 p-3 rounded-xl border border-green-200 text-xs">
+          <div className="flex items-center justify-between text-green-800 bg-green-50 p-3.5 rounded-xl border border-green-200 text-xs">
             <div className="flex items-center gap-2 font-bold">
               <Check className="w-4 h-4 text-green-600" />
-              Donation Completed & Verified!
+              Donation Completed & Fully Verified!
             </div>
             <span className="text-green-700 font-medium">Thank you for saving a life.</span>
           </div>
-        ) : donation ? (
-          <div className="bg-amber-50/80 border border-amber-200 p-4 rounded-xl text-xs space-y-3">
+        ) : isActive ? (
+          <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <span className="font-bold text-amber-900 flex items-center gap-1.5 text-sm">
-                <Shield className="w-4 h-4 text-amber-700" />
-                Donation In Progress
-              </span>
+              <div className="flex items-center gap-2">
+                <StatusBadge status={donation.status || 'OTP_PENDING'} />
+                <span className="text-xs font-semibold text-gray-700">Donation In Progress</span>
+              </div>
               <button
                 onClick={() => setShowCancelModal(true)}
-                className="text-red-600 hover:underline font-semibold"
+                className="text-red-600 hover:underline font-semibold text-xs"
               >
                 Cancel Pledge
               </button>
             </div>
 
-            {/* Instruction: Tell requester your verbal OTP */}
-            <div className="bg-white p-3 rounded-lg border border-amber-200 flex items-center justify-between">
-              <div>
-                <p className="text-gray-500 text-[11px]">Your 4-Digit Donor Verbal Code (speak to requester upon arrival):</p>
-                {donorVerbalOtp ? (
-                  <p className="text-2xl font-black text-red-700 tracking-widest mt-0.5">{donorVerbalOtp}</p>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleGenerateDonorOtp}
-                    disabled={isGeneratingOtp}
-                    className="mt-1 text-xs border-red-300 text-red-700 hover:bg-red-50"
-                  >
-                    {isGeneratingOtp ? 'Generating...' : 'Reveal / Generate My Code'}
-                  </Button>
-                )}
-              </div>
-              <div className="text-right">
-                <span className="text-[10px] text-gray-400 block max-w-[140px]">
-                  Verifies physical arrival. Valid for 10 minutes.
-                </span>
-                {donorVerbalOtp && (
-                  <button
-                    onClick={handleGenerateDonorOtp}
-                    disabled={isGeneratingOtp}
-                    className="text-[10px] text-red-600 hover:underline mt-1 font-semibold"
-                  >
-                    Regenerate Code
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Prompt to enter requester's OTP */}
-            <div className="pt-2">
-              <p className="font-semibold text-gray-800 mb-2">
-                Enter the 4-digit OTP provided by the patient/requester:
-              </p>
-              <OtpInput onChange={setEnteredOtp} />
-
-              {otpError && (
-                <p className="text-red-600 font-medium text-xs mt-2 text-center">{otpError}</p>
-              )}
-
-              <Button
-                onClick={handleVerifyOtp}
-                disabled={isVerifying || enteredOtp.length !== 4}
-                className="w-full mt-3 bg-red-600 hover:bg-red-700 text-white font-bold py-2.5 rounded-lg"
-              >
-                {isVerifying ? 'Verifying OTP...' : 'Confirm & Complete Donation'}
-              </Button>
-            </div>
+            {/* Dual OTP Verification Flow for Donor */}
+            <DualOtpVerification
+              donation={donation}
+              request={request}
+              currentRole="DONOR"
+              currentUser={user}
+              onStatusChange={(updatedFields) => {
+                setDonation(prev => ({ ...prev, ...updatedFields }));
+                if (onDonationChange) onDonationChange();
+              }}
+            />
           </div>
         ) : (
-          <div className="flex items-center justify-between gap-4">
-            <p className="text-xs text-gray-500">
-              {isCompatible 
-                ? 'Your blood group is compatible for this patient.' 
-                : 'Blood group does not match your profile.'}
-            </p>
-            <Button
-              onClick={handlePledgeDonation}
-              disabled={!isCompatible || !isEligible}
-              className={`px-6 font-bold text-xs py-2 rounded-lg transition-colors ${
-                !isCompatible || !isEligible
-                  ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                  : 'bg-red-600 hover:bg-red-700 text-white shadow-sm'
-              }`}
-            >
-              {!isEligible ? `Eligible in ${remainingDays}d` : 'Pledge Donation'}
-            </Button>
+          <div>
+            {isCancelled && (
+              <div className="mb-3 p-2.5 bg-gray-100 border border-gray-200 rounded-lg text-xs text-gray-600 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="bg-gray-200 text-gray-700 font-bold px-2 py-0.5 rounded text-[10px]">CANCELLED</span>
+                  <span>Your previous pledge for this request was cancelled.</span>
+                </div>
+                {donation?.cancellationReason && (
+                  <span className="text-gray-500 italic text-[11px]">Reason: {donation.cancellationReason}</span>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center justify-between gap-4">
+              <p className="text-xs text-gray-500">
+                {!isRequestActive(request)
+                  ? 'This blood request is fulfilled or closed.'
+                  : hasOtherActiveCommitment
+                  ? 'You already have an active donation commitment.'
+                  : isCompatible 
+                  ? 'Your blood group is compatible for this patient.' 
+                  : 'Blood group does not match your profile.'}
+              </p>
+              <Button
+                onClick={handlePledgeDonation}
+                disabled={!isRequestActive(request) || !isCompatible || !isEligible || isPledging || hasOtherActiveCommitment}
+                className={`px-6 font-bold text-xs py-2 rounded-lg transition-colors ${
+                  !isRequestActive(request) || !isCompatible || !isEligible || hasOtherActiveCommitment
+                    ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                    : 'bg-red-600 hover:bg-red-700 text-white shadow-sm'
+                }`}
+              >
+                {isPledging
+                  ? 'Pledging...'
+                  : hasOtherActiveCommitment
+                  ? 'Active Commitment Ongoing'
+                  : !isEligible
+                  ? `Eligible in ${remainingDays}d`
+                  : isCancelled
+                  ? 'Re-Pledge Donation'
+                  : 'Pledge Donation'}
+              </Button>
+            </div>
+            {(pledgeError || (hasOtherActiveCommitment && !isCancelled)) && (
+              <p className="text-xs text-red-600 font-medium mt-2">
+                {pledgeError || (hasOtherActiveCommitment ? COMMITMENT_ERROR_MSG : '')}
+              </p>
+            )}
           </div>
         )}
       </div>

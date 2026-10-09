@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import NotificationCenter from "@/components/NotificationCenter";
-import { Menu, User, X, LogOut, HeartHandshake, PlusCircle, AlertTriangle } from "lucide-react";
+import { Menu, User, X, LogOut, HeartHandshake, PlusCircle, AlertTriangle, Shield, ShieldAlert } from "lucide-react";
 import { isAdminRole, isSuperAdminRole } from "@/lib/roles";
 
 const Navbar = () => {
@@ -146,6 +146,27 @@ const Navbar = () => {
                         </Link>
                       )}
 
+                      {isAdmin && (
+                        <Link
+                          href="/admin"
+                          onClick={() => setShowProfileDropdown(false)}
+                          className="flex items-center px-4 py-2.5 text-sm text-gray-700 hover:bg-red-50 hover:text-red-700 transition-colors font-medium"
+                        >
+                          <Shield className="w-4 h-4 mr-2 text-red-600" />
+                          Admin Console
+                        </Link>
+                      )}
+
+                      {isSuperAdmin && (
+                        <Link
+                          href="/superadmin"
+                          onClick={() => setShowProfileDropdown(false)}
+                          className="flex items-center px-4 py-2.5 text-sm text-gray-700 hover:bg-purple-50 hover:text-purple-700 transition-colors font-medium"
+                        >
+                          <ShieldAlert className="w-4 h-4 mr-2 text-purple-600" />
+                          Superadmin Console
+                        </Link>
+                      )}
 
                       <div className="border-t border-gray-100 mt-1">
                         <button

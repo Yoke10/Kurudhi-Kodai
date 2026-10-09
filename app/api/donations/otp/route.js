@@ -68,6 +68,13 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Unauthorized: You are not a party to this donation' }, { status: 403 });
     }
 
+    if (requestData.status === 'CANCELLED') {
+      return NextResponse.json({ error: 'This blood request has been cancelled and cannot proceed.' }, { status: 400 });
+    }
+    if (donationData.status === 'CANCELLED') {
+      return NextResponse.json({ error: 'This donation commitment has been cancelled.' }, { status: 400 });
+    }
+
     // -------------------------------------------------------------
     // ACTION 1: GENERATE DONOR OTP (Plaintext returned only to Donor)
     // -------------------------------------------------------------
@@ -166,7 +173,30 @@ export async function POST(request) {
           }, { status: 400 });
         }
 
-        // MATCH CONFIRMED! Complete the transaction atomically
+        // MATCH CONFIRMED for Donor OTP!
+        // Check if Requester OTP has ALREADY been verified by the donor
+        const isRequesterOtpAlreadyVerified = donationData.requesterOtpVerified === true;
+
+        if (!isRequesterOtpAlreadyVerified) {
+          // First verification complete: Donor's code is confirmed, Requester's code is still pending
+          await updateDoc(donationRef, {
+            donorOtpVerified: true,
+            donorOtpVerifiedAt: serverTimestamp(),
+            status: DONATION_STATES.DONOR_CONFIRMED,
+            updatedAt: serverTimestamp(),
+          });
+
+          return NextResponse.json({
+            success: true,
+            isFullyCompleted: false,
+            donorOtpVerified: true,
+            requesterOtpVerified: false,
+            status: DONATION_STATES.DONOR_CONFIRMED,
+            message: "Donor's verbal code successfully verified! Awaiting the donor to verify your requester code before final completion.",
+          });
+        }
+
+        // BOTH OTPs ARE NOW CONFIRMED! Atomically complete the donation
         return await executeAtomicDonationCompletion({
           requestRef,
           donationRef,
@@ -175,6 +205,7 @@ export async function POST(request) {
           verifiedRole: 'REQUESTER',
           donorUid: donationData.donorUid || donationData.donorId,
           userUid,
+          setDonorOtpVerified: true,
         });
       }
 
@@ -206,7 +237,30 @@ export async function POST(request) {
           }, { status: 400 });
         }
 
-        // MATCH CONFIRMED! Complete the transaction atomically
+        // MATCH CONFIRMED for Requester OTP!
+        // Check if Donor OTP has ALREADY been verified by the requester
+        const isDonorOtpAlreadyVerified = donationData.donorOtpVerified === true;
+
+        if (!isDonorOtpAlreadyVerified) {
+          // First verification complete: Requester's code is confirmed, Donor's code is still pending
+          await updateDoc(donationRef, {
+            requesterOtpVerified: true,
+            requesterOtpVerifiedAt: serverTimestamp(),
+            status: DONATION_STATES.REQUESTER_CONFIRMED,
+            updatedAt: serverTimestamp(),
+          });
+
+          return NextResponse.json({
+            success: true,
+            isFullyCompleted: false,
+            donorOtpVerified: false,
+            requesterOtpVerified: true,
+            status: DONATION_STATES.REQUESTER_CONFIRMED,
+            message: "Requester confirmation code successfully verified! Awaiting the requester to verify your donor code before final completion.",
+          });
+        }
+
+        // BOTH OTPs ARE NOW CONFIRMED! Atomically complete the donation
         return await executeAtomicDonationCompletion({
           requestRef,
           donationRef,
@@ -215,6 +269,7 @@ export async function POST(request) {
           verifiedRole: 'DONOR',
           donorUid: userUid,
           userUid,
+          setRequesterOtpVerified: true,
         });
       }
     }
@@ -234,6 +289,7 @@ export async function POST(request) {
 
 /**
  * Executes the atomic transaction guaranteeing unitsDonated <= unitsNeeded
+ * and ensuring BOTH OTPs are verified before completion.
  */
 async function executeAtomicDonationCompletion({
   requestRef,
@@ -242,7 +298,9 @@ async function executeAtomicDonationCompletion({
   donationId,
   verifiedRole,
   donorUid,
-  userUid
+  userUid,
+  setDonorOtpVerified,
+  setRequesterOtpVerified,
 }) {
   let isFulfilled = false;
   let finalDonated = 0;
@@ -258,9 +316,17 @@ async function executeAtomicDonationCompletion({
     const rData = reqSnap.data();
     const dData = donSnap.data();
 
-    // Prevent double completion
+    // Prevent double completion (idempotent safety)
     if (dData.status === DONATION_STATES.DONATION_COMPLETED || dData.completed === true) {
       throw new Error('This donation has already been completed.');
+    }
+
+    // Double-verify that BOTH parties' OTPs are confirmed
+    const finalDonorVerified = setDonorOtpVerified || dData.donorOtpVerified === true;
+    const finalRequesterVerified = setRequesterOtpVerified || dData.requesterOtpVerified === true;
+
+    if (!finalDonorVerified || !finalRequesterVerified) {
+      throw new Error('Both donor and requester codes must be verified before completing donation.');
     }
 
     const unitsNeeded = parseInt(rData.unitsNeeded || rData.UnitsNeeded || 1, 10);
@@ -282,8 +348,10 @@ async function executeAtomicDonationCompletion({
       updatedAt: serverTimestamp(),
     });
 
-    // 2. Atomically mark donation as completed
+    // 2. Atomically mark donation as completed with dual verified flags
     tx.update(donationRef, {
+      donorOtpVerified: true,
+      requesterOtpVerified: true,
       status: DONATION_STATES.DONATION_COMPLETED,
       completed: true,
       completedAt: serverTimestamp(),
@@ -291,6 +359,21 @@ async function executeAtomicDonationCompletion({
       verifiedByUid: userUid,
       updatedAt: serverTimestamp(),
     });
+
+    // 3. Atomically release active commitment
+    if (donorUid) {
+      const commitmentRef = doc(db, 'donorCommitments', donorUid);
+      tx.set(
+        commitmentRef,
+        {
+          status: 'COMPLETED',
+          activeDonationId: null,
+          completedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
   });
 
   // Post-transaction updates (cooldown, notifications, audit log)
@@ -316,7 +399,10 @@ async function executeAtomicDonationCompletion({
 
   return NextResponse.json({
     success: true,
-    message: 'Donation successfully verified and completed!',
+    isFullyCompleted: true,
+    donorOtpVerified: true,
+    requesterOtpVerified: true,
+    message: 'Both codes verified! Donation successfully recorded and completed.',
     status: DONATION_STATES.DONATION_COMPLETED,
     unitsDonated: finalDonated,
     isFulfilled,

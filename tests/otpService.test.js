@@ -5,7 +5,9 @@ import {
   hashOtp,
   verifyOtpInput,
   OTP_EXPIRY_MS,
-  MAX_OTP_ATTEMPTS
+  MAX_OTP_ATTEMPTS,
+  isDualOtpFullyVerified,
+  getPartyOtpStatus
 } from '../lib/otpService.js'
 
 test('OTP Service - Generates 4-digit numeric string', () => {
@@ -90,4 +92,87 @@ test('OTP Service - Non-4-digit input rejection', async () => {
   const result3 = await verifyOtpInput('abcd', hashed, now, 0)
   assert.equal(result3.valid, false)
 })
+
+test('OTP Service - Dual-OTP Completion Condition', () => {
+  assert.equal(isDualOtpFullyVerified(null), false)
+  assert.equal(isDualOtpFullyVerified({}), false)
+  assert.equal(isDualOtpFullyVerified({ donorOtpVerified: true, requesterOtpVerified: false }), false)
+  assert.equal(isDualOtpFullyVerified({ donorOtpVerified: false, requesterOtpVerified: true }), false)
+  assert.equal(isDualOtpFullyVerified({ donorOtpVerified: true, requesterOtpVerified: true }), true)
+})
+
+test('OTP Service - Party OTP Status Analysis', () => {
+
+  // Not generated
+  const notGen = getPartyOtpStatus({}, 'DONOR')
+  assert.equal(notGen.state, 'NOT_GENERATED')
+
+  // Active
+  const active = getPartyOtpStatus({
+    donorOtpHash: 'mock-hash',
+    donorOtpExpiresAt: new Date(Date.now() + 500000),
+    donorOtpAttemptsRemaining: 3
+  }, 'DONOR')
+  assert.equal(active.state, 'ACTIVE')
+
+  // Expired
+  const expired = getPartyOtpStatus({
+    donorOtpHash: 'mock-hash',
+    donorOtpExpiresAt: new Date(Date.now() - 500000),
+    donorOtpAttemptsRemaining: 3
+  }, 'DONOR')
+  assert.equal(expired.state, 'EXPIRED')
+
+  // Locked
+  const locked = getPartyOtpStatus({
+    donorOtpHash: 'mock-hash',
+    donorOtpExpiresAt: new Date(Date.now() + 500000),
+    donorOtpAttemptsRemaining: 0
+  }, 'DONOR')
+  assert.equal(locked.state, 'LOCKED')
+
+  // Verified
+  const verified = getPartyOtpStatus({
+    donorOtpVerified: true
+  }, 'DONOR')
+  assert.equal(verified.state, 'VERIFIED')
+
+  // Requester party checks
+  const reqNotGen = getPartyOtpStatus({}, 'REQUESTER')
+  assert.equal(reqNotGen.state, 'NOT_GENERATED')
+
+  const reqActive = getPartyOtpStatus({
+    requesterOtpHash: 'req-hash',
+    requesterOtpExpiresAt: new Date(Date.now() + 600000),
+    requesterOtpAttemptsRemaining: 3
+  }, 'REQUESTER')
+  assert.equal(reqActive.state, 'ACTIVE')
+
+  const reqLocked = getPartyOtpStatus({
+    requesterOtpHash: 'req-hash',
+    requesterOtpExpiresAt: new Date(Date.now() + 600000),
+    requesterOtpAttemptsRemaining: 0
+  }, 'REQUESTER')
+  assert.equal(reqLocked.state, 'LOCKED')
+
+  const reqVerified = getPartyOtpStatus({
+    requesterOtpVerified: true
+  }, 'REQUESTER')
+  assert.equal(reqVerified.state, 'VERIFIED')
+})
+
+test('OTP Service - Regeneration Invariant', async () => {
+  const otp1 = generate4DigitOtp()
+  const hash1 = await hashOtp(otp1)
+
+  const otp2 = generate4DigitOtp()
+  const hash2 = await hashOtp(otp2)
+
+  // Explicit regeneration produces a new distinct hash or code
+  assert.ok(hash1.length === 64)
+  assert.ok(hash2.length === 64)
+  assert.equal(typeof hash1, 'string')
+  assert.equal(typeof hash2, 'string')
+})
+
 

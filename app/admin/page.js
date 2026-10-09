@@ -1,1836 +1,455 @@
-'use client'
-import { Button } from '@/components/ui/button'
+'use client';
+
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@/context/AuthContext';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
-import { Textarea } from '@/components/ui/textarea';
-import SupportPage from '../support/page';
-import { useAuth } from '@/context/AuthContext'
-import {
-  addDoc,
   collection,
+  collectionGroup,
   doc,
   getDoc,
   getDocs,
   onSnapshot,
   query,
+  where,
   updateDoc,
-  where
-} from 'firebase/firestore'
-import Image from 'next/image'
-import Link from 'next/link'
-import { useRouter } from 'next/navigation'
-import exportToExcel from '@/utils/exportToExcel'
-import { useEffect, useState, useCallback } from 'react'
-import { toast } from 'react-hot-toast'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
+  addDoc,
+  serverTimestamp,
+} from 'firebase/firestore';
+import { db } from '@/lib/firebase';
+import { ROLES, normalizeRole, isAdminRole } from '@/lib/roles';
+import { logAuditEvent, AUDIT_ACTIONS } from '@/lib/auditLogger';
 
-import { db } from '@/lib/firebase'
-import { logAuditEvent, AUDIT_ACTIONS } from '@/lib/auditLogger'
-import { ROLES, normalizeRole, isAdminRole } from '@/lib/roles'
+// Modular Admin Components
+import AdminShell from '@/components/admin/AdminShell';
+import AdminOverview from '@/components/admin/AdminOverview';
+import AdminRequestsTab from '@/components/admin/AdminRequestsTab';
+import AdminDonationsTab from '@/components/admin/AdminDonationsTab';
+import AdminDonorsTab from '@/components/admin/AdminDonorsTab';
+import AdminCampsTab from '@/components/admin/AdminCampsTab';
+import SupportPage from '../support/page';
 
-export default function AdminDashboard() {
-  const { user } = useAuth()
-  const router = useRouter()
-  const [loading, setLoading] = useState(true)
-  const [userRole, setUserRole] = useState(null)
-  const [requests, setRequests] = useState([])
-  const [donors, setDonors] = useState([])
-  const [camps, setCamps] = useState([])
-  const [assignedCity, setAssignedCity] = useState('')
-  const [stats, setStats] = useState({
-    totalRequests: 0,
-    currentRequests: 0,
-    ongoingRequests: 0,
-    completedRequests: 0,
-    rejectedRequests: 0,
-    totalDonors: 0,
-    upcomingCamps: 0,
-    ongoingCamps: 0,
-    completedCamps: 0
-  })
-  const [activeTab, setActiveTab] = useState('requests')
-  const [activeRequestFilter, setActiveRequestFilter] = useState('received')
-  const [activeCampFilter, setActiveCampFilter] = useState('all')
-  const [activeBloodGroupFilter, setActiveBloodGroupFilter] = useState('all')
-  const [activeGenderFilter, setActiveGenderFilter] = useState('all')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [donorStats, setDonorStats] = useState({
-    byBloodGroup: {},
-    availableDonors: 0,
-    unavailableDonors: 0
-  })
-  const [activeDonorStatusFilter, setActiveDonorStatusFilter] = useState('all')
-  const [currentPage, setCurrentPage] = useState(1)
-  const itemsPerPage = 10
-  const [selectedItem, setSelectedItem] = useState(null)
-  const [isModalOpen, setIsModalOpen] = useState(false)
-  const [modalType, setModalType] = useState('request')
-  const [confirmModal, setConfirmModal] = useState({
-    open: false,
-    action: '',
-    requestId: null,
-    message: ''
-  })
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
-  const [showConfirmDialog, setShowConfirmDialog] = useState(false)
-  const [actionId, setActionId] = useState('')
-  const [actionType, setActionType] = useState('')
-  const [showRejectionModal, setShowRejectionModal] = useState(false) 
-  const [rejectionReason, setRejectionReason] = useState('') 
-  const [showEmergencyDialog, setShowEmergencyDialog] = useState(false)
-  const [emergencyLevel, setEmergencyLevel] = useState('')
-  const [isDonorsModalOpen, setIsDonorsModalOpen] = useState(false)
-  // Cancelled donors modal state
-  const [isCancelledModalOpen, setIsCancelledModalOpen] = useState(false)
-  const [requestCancellations, setRequestCancellations] = useState([])
-  const [loadingCancelled, setLoadingCancelled] = useState(false)
-  const [selectedRequestDonors, setSelectedRequestDonors] = useState([])
-  const [loadingDonors, setLoadingDonors] = useState(false)
-  const [buttonLoadingId, setButtonLoadingId] = useState(null)
+export default function AdminPage() {
+  const { user } = useAuth();
+  const router = useRouter();
 
-  const [isRejectionDetailsModalOpen, setIsRejectionDetailsModalOpen] = useState(false)
-  const [rejectionDetails, setRejectionDetails] = useState([])
-  const [loadingRejectionDetails, setLoadingRejectionDetails] = useState(false)
+  const [loading, setLoading] = useState(true);
+  const [userRole, setUserRole] = useState(null);
+  const [assignedCity, setAssignedCity] = useState('');
+  const [activeTab, setActiveTab] = useState('overview');
 
-  // Add state for Created By details
-  const [createdByInfo, setCreatedByInfo] = useState(null)
-  const [showCreatedBy, setShowCreatedBy] = useState(false)
-  const [loadingCreatedBy, setLoadingCreatedBy] = useState(false)
+  // Collections state
+  const [requests, setRequests] = useState([]);
+  const [donations, setDonations] = useState([]);
+  const [donors, setDonors] = useState([]);
+  const [camps, setCamps] = useState([]);
 
-  // Function to export current section data to Excel
-  const handleExport = () => {
-    let rows = [];
-    let filename = 'data.xlsx';
-    if (activeTab === 'requests') {
-      rows = requests;
-      filename = 'requests.xlsx';
-    } else if (activeTab === 'camps') {
-      rows = camps;
-      filename = 'camps.xlsx';
-    } else if (activeTab === 'donors') {
-      rows = donors;
-      filename = 'donors.xlsx';
-    }
-    if (!rows.length) {
-      toast.error('No data to export');
-      return;
-    }
-    exportToExcel(rows, filename);
-  }
+  // Loading states
+  const [loadingRequests, setLoadingRequests] = useState(true);
+  const [loadingDonations, setLoadingDonations] = useState(true);
+  const [loadingDonors, setLoadingDonors] = useState(true);
+  const [loadingCamps, setLoadingCamps] = useState(true);
 
-  // Define fetchRequests with useCallback - optimized without N+1 query loop
-  const fetchRequests = useCallback(async () => {
-    try {
-      const requestsRef = collection(db, 'requests');
-      let requestQuery;
-      
-      if (normalizeRole(userRole) === ROLES.ADMIN && assignedCity) {
-        requestQuery = query(requestsRef, where('City', '==', assignedCity));
-      } else {
-        requestQuery = query(requestsRef);
-      }
-      
-      const requestsSnapshot = await getDocs(requestQuery);
-      const requestsData = requestsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      
-      setRequests(requestsData);
-    } catch (error) {
-      console.error("Error fetching requests: ", error);
-    }
-  }, [userRole, assignedCity]);
-
-  // Check user authorization
+  // Authentication & Role Check
   useEffect(() => {
     if (!user) {
-      router.replace('/signin')
-      return
+      router.replace('/signin');
+      return;
     }
 
-    const checkUserRole = async () => {
-      setLoading(true)
+    const checkAuthorization = async () => {
       try {
-        const userRef = doc(db, 'users', user.uid)
-        const userSnap = await getDoc(userRef)
-        
+        const userRef = doc(db, 'users', user.uid);
+        const userSnap = await getDoc(userRef);
+
         if (userSnap.exists()) {
-          const userData = userSnap.data()
-          // Get canonical user role
-          const role = normalizeRole(userData.role)
-          setUserRole(role)
-          
-          // Get assigned city for admin
-          if (role === ROLES.ADMIN) {
-            setAssignedCity(userData.assignedCity || '')
-          }
-          
-          // Only allow ADMIN or SUPERADMIN to access dashboard
+          const userData = userSnap.data();
+          const role = normalizeRole(userData.role);
+
           if (!isAdminRole(role)) {
-            router.replace('/')
-            return
+            router.replace('/');
+            return;
           }
+
+          setUserRole(role);
+          setAssignedCity(userData.assignedCity || '');
         } else {
-          // No user document found, redirect
-          router.replace('/')
-          return
+          router.replace('/');
         }
-      } catch (error) {
-        console.error('Error checking user role:', error)
-        router.replace('/')
-        return
+      } catch (err) {
+        console.error('Error verifying admin permissions:', err);
+        router.replace('/');
       } finally {
-        setLoading(false)
-      }
-    }
-
-    checkUserRole()
-  }, [user, router])
-
-  // Fetch donors when user is authorized or assignedCity changes
-  useEffect(() => {
-    const fetchDonors = async () => {
-      if (!user || !userRole) {
-        return;
-      }
-
-      // Only fetch if user has proper permissions
-      if (!isAdminRole(userRole)) {
-        return;
-      }
-      
-      try {
-        console.log(`Fetching donors with role: ${userRole}, city: ${assignedCity || 'none'}`);
-        
-        const donorsCollection = collection(db, 'donors');
-        let donorQuery;
-        
-        // Strict filtering for ADMIN users
-        if (normalizeRole(userRole) === ROLES.ADMIN && assignedCity) {
-          // Make sure to filter for exact city match
-          donorQuery = query(donorsCollection, where('ResidentCity', '==', assignedCity));
-          console.log(`Filtering donors for city: ${assignedCity}`);
-        } else {
-          // For SUPERADMIN, no filtering
-          donorQuery = donorsCollection;
-          console.log('No city filtering (SUPERADMIN)');
-        }
-        
-        const donorSnapshot = await getDocs(donorQuery);
-        const donorList = donorSnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-        
-        console.log(`Total donors fetched: ${donorList.length}`);
-        
-        // Calculate statistics for donors
-        const stats = {
-          byBloodGroup: {},
-          availableDonors: 0,
-          unavailableDonors: 0
-        };
-        
-        // Initialize blood group counters
-        ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].forEach(bg => {
-          stats.byBloodGroup[bg] = {
-            total: 0,
-            available: 0,
-            unavailable: 0
-          };
-        });
-        
-        // Count donors by blood group and availability
-        donorList.forEach(donor => {
-          if (donor.BloodGroup) {
-            // Increment total count for this blood group
-            if (!stats.byBloodGroup[donor.BloodGroup]) {
-              stats.byBloodGroup[donor.BloodGroup] = { total: 0, available: 0, unavailable: 0 };
-            }
-            stats.byBloodGroup[donor.BloodGroup].total++;
-            
-            // Determine if donor is available
-            const lastDonation = donor.lastDonationDate && donor.lastDonationDate.toDate
-              ? donor.lastDonationDate.toDate()
-              : donor.lastDonationDate
-              ? new Date(donor.lastDonationDate)
-              : null
-            const ninetyDaysAgo = new Date();
-            ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-            
-            if (!lastDonation || lastDonation < ninetyDaysAgo) {
-              stats.byBloodGroup[donor.BloodGroup].available++;
-              stats.availableDonors++;
-            } else {
-              stats.byBloodGroup[donor.BloodGroup].unavailable++;
-              stats.unavailableDonors++;
-            }
-          }
-        });
-        
-        setDonorStats(stats);
-        setDonors(donorList);
-      } catch (error) {
-        console.error("Error fetching donors:", error);
-        toast.error("Failed to load donors");
+        setLoading(false);
       }
     };
 
-    fetchDonors();
-  }, [user, userRole, assignedCity, db])
+    checkAuthorization();
+  }, [user, router]);
 
-  // Separate useEffect for fetching requests based on userRole and assignedCity
+  // Subscribe to Requests (scoped by assignedCity if regional Admin)
   useEffect(() => {
-    if (!user) return;
-    
-    if (isAdminRole(userRole)) {
-      fetchRequests();
+    if (!userRole) return;
+    setLoadingRequests(true);
+
+    const reqCollection = collection(db, 'requests');
+    let q = query(reqCollection);
+
+    if (userRole === ROLES.ADMIN && assignedCity) {
+      q = query(reqCollection, where('City', '==', assignedCity));
     }
-  }, [userRole, assignedCity, fetchRequests]);
 
-  // Fetch camps in real time  
-  useEffect(() => {
-    const unsubscribe = onSnapshot(collection(db, 'camps'), (snapshot) => {
-      const now = new Date()
-      const campsList = snapshot.docs.map(doc => {
-        const data = doc.data()
-        const campStart = new Date(data.CampStart)
-        const campEnd = new Date(data.CampEnd)
-        let computedStatus = ''
-        if (campStart > now) {
-          computedStatus = 'upcoming'
-        } else if (campStart <= now && campEnd >= now) {
-          computedStatus = 'ongoing'
-        } else {
-          computedStatus = 'completed'
-        }
-        return { id: doc.id, ...data, CampStatus: computedStatus }
-      })
-      setCamps(campsList)
-      setStats(prev => ({
-        ...prev,
-        upcomingCamps: campsList.filter(camp => camp.CampStatus === "upcoming").length,
-        ongoingCamps: campsList.filter(camp => camp.CampStatus === "ongoing").length,
-        completedCamps: campsList.filter(camp => camp.CampStatus === "completed").length
-      }))
-    })
-    return () => unsubscribe()
-  }, [])
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const list = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        // Also client-side filter case-insensitively if legacy mixed case exists
+        const filtered = assignedCity && userRole === ROLES.ADMIN
+          ? list.filter((r) => (r.city || r.City || '').toLowerCase() === assignedCity.toLowerCase())
+          : list;
 
-  // Update request status function with confirmation
-  const updateRequestStatus = async (id, status, emergencyLevel = null) => {
-    try {
-      const requestRef = doc(db, 'requests', id)
-      const normalizedStatus = status === 'accepted' ? 'ACTIVE' : (status === 'rejected' ? 'REJECTED' : status)
-      const updateData = {
-        Verified: status,
-        status: normalizedStatus,
-        updatedAt: new Date()
+        setRequests(filtered);
+        setLoadingRequests(false);
+      },
+      (err) => {
+        console.warn('Requests listener notice:', err);
+        setLoadingRequests(false);
       }
-      
-      // Add emergency level if provided
-      if (emergencyLevel) {
-        updateData.EmergencyLevel = emergencyLevel
-        updateData.emergencyLevel = emergencyLevel
-      }
-      
-      await updateDoc(requestRef, updateData)
+    );
 
-      await logAuditEvent({
-        action: status === 'accepted' ? AUDIT_ACTIONS.REQUEST_VERIFIED : AUDIT_ACTIONS.ADMIN_ACTION,
-        performedByUid: user?.uid,
-        targetId: id,
-        targetType: 'bloodRequest',
-        details: { status, emergencyLevel }
-      })
+    return () => unsubscribe();
+  }, [userRole, assignedCity]);
 
-      toast.success(`Request ${status} successfully`)
-      fetchRequests()
-    } catch (error) {
-      console.error('Error updating request:', error)
-      toast.error('Failed to update request')
-    }
-  }
-
-  // Opens the confirmation modal for any action
-  const handleConfirmAction = (id, action) => {
-    setActionId(id)
-    setActionType(action)
-    
-    if (action === 'accepted') {
-      setEmergencyLevel('') // Reset emergency level
-      setShowEmergencyDialog(true)
-    } else if (action === 'rejected') {
-      // Open rejection modal for 'rejected' action
-      setShowRejectionModal(true)
-    } else {
-      setShowConfirmDialog(true)
-    }
-  }
-
-  // Open cancelled donors modal for a request
-  // Open rejection details modal for a request
-  const openRejectionDetailsModal = async (requestId) => {
-    try {
-      setLoadingRejectionDetails(true);
-      const rejectionsRef = collection(db, 'requests', requestId, 'rejections');
-      const rejectionsSnapshot = await getDocs(rejectionsRef);
-
-      const rejectionsWithAdminDetails = await Promise.all(
-        rejectionsSnapshot.docs.map(async (rejectionDoc) => {
-          const rejectionData = rejectionDoc.data();
-          let adminDetails = {};
-
-          if (rejectionData.userId) {
-            const userDocSnap = await getDoc(doc(db, 'users', rejectionData.userId));
-            if (userDocSnap.exists()) {
-              adminDetails = userDocSnap.data();
-            }
-          }
-          
-          return { 
-              id: rejectionDoc.id, 
-              ...rejectionData, 
-              adminDetails 
-          };
-        })
-      );
-
-      setRejectionDetails(rejectionsWithAdminDetails);
-    } catch (error) {
-      console.error('Error fetching rejection details:', error);
-      toast.error('Failed to load rejection details');
-    } finally {
-      setLoadingRejectionDetails(false);
-      setIsRejectionDetailsModalOpen(true);
-    }
-  }
-
-  // Open cancelled donors modal for a request
-  const openCancelledModal = async (requestId) => {
-    try {
-      setLoadingCancelled(true);
-      const cancellationsRef = collection(db, 'requests', requestId, 'cancellations');
-      const cancellationsSnapshot = await getDocs(cancellationsRef);
-
-      const cancellationsWithDonorDetails = await Promise.all(
-        cancellationsSnapshot.docs.map(async (cancellationDoc) => {
-          const cancellationData = cancellationDoc.data();
-          let donorDetails = {};
-
-          if (cancellationData.donorEmail) {
-            const donorQuery = query(collection(db, 'donors'), where('Email', '==', cancellationData.donorEmail));
-            const donorSnapshot = await getDocs(donorQuery);
-            if (!donorSnapshot.empty) {
-              donorDetails = donorSnapshot.docs[0].data();
-            }
-          } else if (cancellationData.donorId) {
-            // Fallback to get email from users collection using donorId
-            const userDocSnap = await getDoc(doc(db, 'users', cancellationData.donorId));
-            if (userDocSnap.exists() && userDocSnap.data().email) {
-              const donorEmail = userDocSnap.data().email;
-              const donorQuery = query(collection(db, 'donors'), where('Email', '==', donorEmail));
-              const donorSnapshot = await getDocs(donorQuery);
-              if (!donorSnapshot.empty) {
-                donorDetails = donorSnapshot.docs[0].data();
-              }
-            }
-          }
-          
-          return { 
-              id: cancellationDoc.id, 
-              ...cancellationData, 
-              donorDetails 
-          };
-        })
-      );
-
-      setRequestCancellations(cancellationsWithDonorDetails);
-    } catch (error) {
-      console.error('Error fetching cancellations:', error);
-      toast.error('Failed to load cancellations');
-    } finally {
-      setLoadingCancelled(false);
-      setIsCancelledModalOpen(true);
-    }
-  }
-
-  // Open details modal for an item
-  const openDetailsModal = (item, type) => {
-    setSelectedItem(item)
-    setModalType(type)
-    // reset Created By section each time modal opens
-    setShowCreatedBy(false)
-    setCreatedByInfo(null)
-    setIsModalOpen(true)
-  }
-
-  // Toggle display of "Created By" information for a request
-  const handleToggleCreatedBy = async (uuid) => {
-    if (showCreatedBy) {
-      // if already visible, simply hide it
-      setShowCreatedBy(false)
-      return
-    }
-    try {
-      setLoadingCreatedBy(true)
-      // Fetch corresponding user to get email
-      const userSnap = await getDoc(doc(db, 'users', uuid))
-      if (userSnap.exists()) {
-        const userData = userSnap.data()
-        const email = userData.email || userData.Email
-        if (email) {
-          // Fetch donor info using email
-          const donorQuery = query(collection(db, 'donors'), where('Email', '==', email))
-          const donorSnap = await getDocs(donorQuery)
-          if (!donorSnap.empty) {
-            setCreatedByInfo(donorSnap.docs[0].data())
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Error fetching Created By info:', err)
-      toast.error('Failed to load creator info')
-    } finally {
-      setLoadingCreatedBy(false)
-      setShowCreatedBy(true)
-    }
-  }
-
-  // Handle sidebar clicks (mobile and desktop)
-  const handleSidebarClick = (tab) => {
-    setActiveTab(tab)
-    setCurrentPage(1)
-    // Reset sub-filters when switching tabs
-    if (tab === 'requests') {
-      setActiveRequestFilter('received')
-    } else if (tab === 'camps') {
-      setActiveCampFilter('all')
-    } else if (tab === 'donors') {
-      setActiveBloodGroupFilter('all')
-      setActiveGenderFilter('all')
-      setSearchQuery('') // Reset search query
-    }
-    setIsSidebarOpen(false)
-  }
-
-  // Handle the submission of the rejection reason
-  const handleRejectionSubmit = async () => {
-    if (!actionId || !rejectionReason.trim()) {
-      toast.error('Rejection reason cannot be empty.')
-      return
-    }
-
-    setLoading(true)
-    try {
-      const requestRef = doc(db, 'requests', actionId)
-      const rejectionRef = collection(requestRef, 'rejections')
-
-      // Add rejection information to the 'rejections' subcollection
-      await addDoc(rejectionRef, {
-        reason: rejectionReason,
-        rejectedBy: user.displayName || user.email, // Admin's name or email
-        userId: user.uid, // Admin's user ID
-        rejectedAt: new Date(),
-      })
-
-      // Update the request status to 'rejected'
-      await updateDoc(requestRef, {
-        Verified: 'rejected',
-        status: 'REJECTED',
-        updatedAt: new Date()
-      })
-
-      await logAuditEvent({
-        action: AUDIT_ACTIONS.REQUEST_REJECTED,
-        performedByUid: user?.uid,
-        targetId: actionId,
-        targetType: 'bloodRequest',
-        details: { reason: rejectionReason }
-      })
-
-      toast.success('Request rejected successfully with reason.')
-      fetchRequests() // Refresh the requests list
-    } catch (error) {
-      console.error('Error rejecting request:', error)
-      toast.error('Failed to reject request.')
-    } finally {
-      setLoading(false)
-      setShowRejectionModal(false)
-      setRejectionReason('') // Reset reason
-      setActionId(null)
-      setActionType(null)
-    }
-  }
-
-  // Filter data based on active tab and sub-tab selections
-  let filteredData = []
-  if (activeTab === 'requests') {
-    filteredData = activeRequestFilter === 'all'
-      ? requests
-      : requests.filter(req => req.Verified === activeRequestFilter)
-  } else if (activeTab === 'camps') {
-    filteredData = activeCampFilter === 'all'
-      ? camps
-      : camps.filter(camp => camp.CampStatus === activeCampFilter)
-  } else if (activeTab === 'donors') {
-    // Apply multiple filters on donors
-    filteredData = donors.filter(donor => {
-      // Filter by availability status
-      if (activeDonorStatusFilter !== 'all') {
-        const ninetyDaysAgo = new Date()
-        ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90)
-        const lastDonationDate = donor.lastDonationDate && donor.lastDonationDate.toDate
-          ? donor.lastDonationDate.toDate()
-          : donor.lastDonationDate
-          ? new Date(donor.lastDonationDate)
-          : null
-        const isAvailable = !lastDonationDate || lastDonationDate < ninetyDaysAgo
-
-        if (activeDonorStatusFilter === 'available' && !isAvailable) {
-          return false
-        }
-        if (activeDonorStatusFilter === 'unavailable' && isAvailable) {
-          return false
-        }
-      }
-      // First apply search query filter (case-insensitive)
-      if (searchQuery && donor.Name && !donor.Name.toLowerCase().includes(searchQuery.toLowerCase())) {
-        return false;
-      }
-      
-      // Filter by blood group
-      if (activeBloodGroupFilter !== 'all' && donor.BloodGroup !== activeBloodGroupFilter) {
-        return false;
-      }
-      
-      // Filter by gender (case-insensitive comparison)
-      if (activeGenderFilter !== 'all' && 
-          (!donor.Gender || donor.Gender.toLowerCase() !== activeGenderFilter.toLowerCase())) {
-        return false;
-      }
-      
-      return true;
+  // Requests lookup map for easy joining
+  const requestsMap = useMemo(() => {
+    const map = {};
+    requests.forEach((r) => {
+      map[r.id] = r;
     });
-  }
-  const indexOfLastItem = currentPage * itemsPerPage
-  const indexOfFirstItem = indexOfLastItem - itemsPerPage
-  const currentItems = filteredData.slice(indexOfFirstItem, indexOfLastItem)
+    return map;
+  }, [requests]);
 
-  // If loading, show loading spinner
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-red-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading...</p>
-        </div>
-      </div>
-    )
-  }
+  // Subscribe to Donations
+  useEffect(() => {
+    if (!userRole) return;
+    setLoadingDonations(true);
 
-  // If not ADMIN or SUPERADMIN, show unauthorized message
-  if (!isAdminRole(userRole)) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-gray-50">
-        <div className="text-center max-w-md p-8 bg-white rounded-lg shadow-lg">
-          <div className="text-red-600 text-6xl mb-4">⚠️</div>
-          <h1 className="text-2xl font-bold text-gray-800 mb-4">Access Denied</h1>
-          <p className="text-gray-600 mb-6">
-            You do not have permission to access the admin dashboard. 
-            You will be redirected to the home page.
-          </p>
-          <button 
-            onClick={() => router.push('/')}
-            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-          >
-            Return to Home
-          </button>
-        </div>
-      </div>
-    )
-  }
+    try {
+      const donGroup = collectionGroup(db, 'donations');
+      const unsubscribe = onSnapshot(
+        donGroup,
+        (snapshot) => {
+          const list = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+          // If regional admin, keep donations belonging to requests in assigned city
+          const filtered = assignedCity && userRole === ROLES.ADMIN
+            ? list.filter((d) => {
+                const req = requestsMap[d.requestId];
+                return req ? (req.city || req.City || '').toLowerCase() === assignedCity.toLowerCase() : true;
+              })
+            : list;
 
-  // Add a new function to handle setting emergency and then accepting
-  const handleAcceptWithEmergency = () => {
-    if (!emergencyLevel) {
-      toast.error('Please select an emergency level before accepting')
-      return
+          setDonations(filtered);
+          setLoadingDonations(false);
+        },
+        (err) => {
+          console.warn('Donations collectionGroup notice:', err);
+          setLoadingDonations(false);
+        }
+      );
+
+      return () => unsubscribe();
+    } catch (err) {
+      console.warn('Error setting up donations listener:', err);
+      setLoadingDonations(false);
     }
-    
-    updateRequestStatus(actionId, 'accepted', emergencyLevel)
-    setShowEmergencyDialog(false)
-  }
+  }, [userRole, assignedCity, requestsMap]);
 
-  const handleConfirm = () => {
-    if (actionType) {
-      updateRequestStatus(actionId, actionType);
-      setShowConfirmDialog(false);
+  // Subscribe to Donors
+  useEffect(() => {
+    if (!userRole) return;
+    setLoadingDonors(true);
+
+    const donorsCol = collection(db, 'donors');
+    let q = query(donorsCol);
+
+    if (userRole === ROLES.ADMIN && assignedCity) {
+      q = query(donorsCol, where('city', '==', assignedCity));
+    }
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const list = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        const filtered = assignedCity && userRole === ROLES.ADMIN
+          ? list.filter((dn) => (dn.city || dn.City || '').toLowerCase() === assignedCity.toLowerCase())
+          : list;
+
+        setDonors(filtered);
+        setLoadingDonors(false);
+      },
+      (err) => {
+        console.warn('Donors listener notice:', err);
+        setLoadingDonors(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [userRole, assignedCity]);
+
+  // Subscribe to Camps
+  useEffect(() => {
+    if (!userRole) return;
+    setLoadingCamps(true);
+
+    const campsCol = collection(db, 'camps');
+    let q = query(campsCol);
+
+    if (userRole === ROLES.ADMIN && assignedCity) {
+      q = query(campsCol, where('city', '==', assignedCity));
+    }
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const list = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        setCamps(list);
+        setLoadingCamps(false);
+      },
+      (err) => {
+        console.warn('Camps listener notice:', err);
+        setLoadingCamps(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [userRole, assignedCity]);
+
+  // Operational Actions: Verify Request
+  const handleVerifyRequest = async (requestId) => {
+    try {
+      const reqRef = doc(db, 'requests', requestId);
+      await updateDoc(reqRef, {
+        Verified: 'verified',
+        status: 'ACCEPTED',
+        updatedAt: serverTimestamp(),
+      });
+
+      await logAuditEvent({
+        action: AUDIT_ACTIONS.ADMIN_ACTION,
+        actorUid: user.uid,
+        entityType: 'request',
+        entityId: requestId,
+        metadata: { actionType: 'VERIFY_REQUEST' },
+      });
+    } catch (err) {
+      console.error('Error verifying request:', err);
     }
   };
 
-  // Add a function to open the donors modal
-  const openDonorsModal = async (requestId) => {
-    setLoadingDonors(true)
+  // Operational Actions: Reject Request
+  const handleRejectRequest = async (requestId, reason) => {
     try {
-      // Fetch all donations for this request
-      const donationsRef = collection(db, "requests", requestId, "donations")
-      const donationsSnapshot = await getDocs(donationsRef)
-      
-      if (donationsSnapshot.empty) {
-        setSelectedRequestDonors([])
-        setIsDonorsModalOpen(true)
-        return
-      }
-      
-      // Get donation data and fetch donor details for each donation
-      const donationsData = []
-      for (const donationDoc of donationsSnapshot.docs) {
-        const donation = { id: donationDoc.id, ...donationDoc.data() }
-        
-        // Get donor details if available
-        if (donation.donorEmail) {
-          const donorQuery = query(collection(db, "donors"), where("Email", "==", donation.donorEmail))
-          const donorSnapshot = await getDocs(donorQuery)
-          if (!donorSnapshot.empty) {
-            donation.donorDetails = donorSnapshot.docs[0].data()
-          }
-        } else if (donation.donorId) {
-          // Try to get donor email from users collection
-          const userDoc = await getDoc(doc(db, "users", donation.donorId))
-          if (userDoc.exists() && userDoc.data().email) {
-            const donorEmail = userDoc.data().email
-            const donorQuery = query(collection(db, "donors"), where("Email", "==", donorEmail))
-            const donorSnapshot = await getDocs(donorQuery)
-            if (!donorSnapshot.empty) {
-              donation.donorDetails = donorSnapshot.docs[0].data()
-            }
-          }
-        }
-        
-        donationsData.push(donation)
-      }
-      
-      setSelectedRequestDonors(donationsData)
-      setIsDonorsModalOpen(true)
-    } catch (error) {
-      console.error("Error fetching donations:", error)
-      toast.error("Failed to load donor information")
-    } finally {
-      setLoadingDonors(false)
-      setButtonLoadingId(null)
+      const reqRef = doc(db, 'requests', requestId);
+      await updateDoc(reqRef, {
+        status: 'REJECTED',
+        rejectionReason: reason,
+        updatedAt: serverTimestamp(),
+      });
+
+      await logAuditEvent({
+        action: AUDIT_ACTIONS.ADMIN_ACTION,
+        actorUid: user.uid,
+        entityType: 'request',
+        entityId: requestId,
+        metadata: { actionType: 'REJECT_REQUEST', reason },
+      });
+    } catch (err) {
+      console.error('Error rejecting request:', err);
     }
+  };
+
+  // Operational Actions: Toggle Emergency
+  const handleToggleEmergency = async (requestId, isEmergency) => {
+    try {
+      const reqRef = doc(db, 'requests', requestId);
+      await updateDoc(reqRef, {
+        isEmergency,
+        urgencyLevel: isEmergency ? 'CRITICAL' : 'STANDARD',
+        updatedAt: serverTimestamp(),
+      });
+
+      await logAuditEvent({
+        action: AUDIT_ACTIONS.ADMIN_ACTION,
+        actorUid: user.uid,
+        entityType: 'request',
+        entityId: requestId,
+        metadata: { actionType: 'TOGGLE_EMERGENCY', isEmergency },
+      });
+    } catch (err) {
+      console.error('Error updating emergency status:', err);
+    }
+  };
+
+  // Sub-queries: Matched Donors
+  const handleFetchDonorsForRequest = async (requestId) => {
+    try {
+      const donRef = collection(db, 'requests', requestId, 'donations');
+      const snap = await getDocs(donRef);
+      return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    } catch (err) {
+      console.error('Error fetching donors for request:', err);
+      return [];
+    }
+  };
+
+  // Sub-queries: Cancellations
+  const handleFetchCancellationsForRequest = async (requestId) => {
+    try {
+      const canRef = collection(db, 'requests', requestId, 'cancellations');
+      const snap = await getDocs(canRef);
+      return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    } catch (err) {
+      console.error('Error fetching cancellations for request:', err);
+      return [];
+    }
+  };
+
+  // Create Blood Camp
+  const handleCreateCamp = async (campData) => {
+    try {
+      const campsCol = collection(db, 'camps');
+      await addDoc(campsCol, {
+        ...campData,
+        createdByUid: user.uid,
+        createdAt: serverTimestamp(),
+      });
+
+      await logAuditEvent({
+        action: AUDIT_ACTIONS.CAMP_CREATED,
+        actorUid: user.uid,
+        entityType: 'camp',
+        entityId: campData.name,
+        metadata: { city: campData.city },
+      });
+    } catch (err) {
+      console.error('Error creating camp:', err);
+    }
+  };
+
+  // Aggregated KPI Stats
+  const stats = useMemo(() => {
+    const activeRequests = requests.filter((r) =>
+      ['PENDING', 'ACCEPTED', 'PARTIALLY_FULFILLED'].includes(r.status || 'PENDING')
+    ).length;
+
+    const emergencyRequests = requests.filter(
+      (r) => r.isEmergency || r.urgencyLevel === 'CRITICAL' || r.EmergencyLevel === 'high'
+    ).length;
+
+    const pendingVerification = requests.filter((r) => (r.status || 'PENDING') === 'PENDING').length;
+
+    const completedDonations = donations.filter(
+      (d) => d.completed === true || d.status === 'DONATION_COMPLETED'
+    ).length;
+
+    const pendingDualOtp = donations.filter(
+      (d) => !d.completed && d.status !== 'DONATION_COMPLETED' && d.status !== 'CANCELLED'
+    ).length;
+
+    const rejectedRequests = requests.filter((r) =>
+      ['REJECTED', 'CANCELLED'].includes(r.status)
+    ).length;
+
+    const upcomingCamps = camps.filter((c) => {
+      const d = new Date(c.date);
+      return !isNaN(d.getTime()) && d >= new Date();
+    }).length;
+
+    return {
+      activeRequests,
+      emergencyRequests,
+      pendingVerification,
+      completedDonations,
+      pendingDualOtp,
+      totalDonors: donors.length,
+      upcomingCamps,
+      rejectedRequests,
+    };
+  }, [requests, donations, donors, camps]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <div className="text-center space-y-3">
+          <div className="w-9 h-9 border-3 border-red-600 border-t-transparent rounded-full animate-spin mx-auto" />
+          <p className="text-xs text-gray-500 font-medium">Verifying administrator credentials...</p>
+        </div>
+      </div>
+    );
   }
 
   return (
-    <div className="flex min-h-screen bg-gray-50">
-      {/* Sidebar for desktop */}
-      <aside className="hidden md:flex flex-col w-72 bg-gradient-to-b from-blue-900 to-gray-800 text-white p-6 space-y-6 shadow-xl">
-        <div>
-          <h2 className="text-3xl font-extrabold tracking-tight">Admin Dashboard</h2>
-          <p className="text-sm opacity-70">Manage your operations</p>
-          {assignedCity && (
-            <div className="mt-2 px-3 py-1 bg-blue-600 text-white text-sm font-medium rounded-full inline-block">
-              {assignedCity} City Admin
-            </div>
-          )}
+    <AdminShell
+      role={userRole || 'ADMIN'}
+      assignedCity={assignedCity}
+      activeTab={activeTab}
+      onTabChange={setActiveTab}
+      badgeCounts={{
+        requests: stats.pendingVerification,
+        donations: stats.pendingDualOtp,
+        donors: stats.totalDonors,
+      }}
+    >
+      {activeTab === 'overview' && (
+        <AdminOverview
+          stats={stats}
+          assignedCity={assignedCity}
+          onNavigateTab={setActiveTab}
+        />
+      )}
+
+      {activeTab === 'requests' && (
+        <AdminRequestsTab
+          requests={requests}
+          isLoading={loadingRequests}
+          onVerifyRequest={handleVerifyRequest}
+          onRejectRequest={handleRejectRequest}
+          onToggleEmergency={handleToggleEmergency}
+          onFetchDonorsForRequest={handleFetchDonorsForRequest}
+          onFetchCancellationsForRequest={handleFetchCancellationsForRequest}
+        />
+      )}
+
+      {activeTab === 'donations' && (
+        <AdminDonationsTab
+          donations={donations}
+          requestsMap={requestsMap}
+          isLoading={loadingDonations}
+        />
+      )}
+
+      {activeTab === 'donors' && (
+        <AdminDonorsTab
+          donors={donors}
+          isLoading={loadingDonors}
+          assignedCity={assignedCity}
+        />
+      )}
+
+      {activeTab === 'camps' && (
+        <AdminCampsTab
+          camps={camps}
+          isLoading={loadingCamps}
+          onCreateCamp={handleCreateCamp}
+          assignedCity={assignedCity}
+        />
+      )}
+
+      {activeTab === 'support' && (
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm">
+          <SupportPage />
         </div>
-        <nav className="flex-1 space-y-4">
-          <button
-            onClick={() => handleSidebarClick('requests')}
-            className={`w-full text-left px-4 py-2 rounded transition-all duration-300 ${
-              activeTab === 'requests' ? 'bg-red-600' : 'hover:bg-gray-700'
-            }`}
-          >
-            Blood Requests
-          </button>
-          <button
-            onClick={() => handleSidebarClick('camps')}
-            className={`w-full text-left px-4 py-2 rounded transition-all duration-300 ${
-              activeTab === 'camps' ? 'bg-red-600' : 'hover:bg-gray-700'
-            }`}
-          >
-            Blood Camps
-          </button>
-          <button
-            onClick={() => handleSidebarClick('donors')}
-            className={`w-full text-left px-4 py-2 rounded transition-all duration-300 ${
-              activeTab === 'donors' ? 'bg-red-600' : 'hover:bg-gray-700'
-            }`}
-          >
-            Donors
-          </button>
-          <button
-            onClick={() => handleSidebarClick('support')}
-            className={`w-full text-left px-4 py-2 rounded transition-all duration-300 ${
-              activeTab === 'support' ? 'bg-red-600' : 'hover:bg-gray-700'
-            }`}
-          >
-            Support
-          </button>
-        </nav>
-      </aside>
-
-      {/* Mobile Sidebar */}
-      <Dialog open={isSidebarOpen} onOpenChange={setIsSidebarOpen}>
-        <DialogContent className="w-72 bg-gradient-to-b from-blue-900 to-gray-800 text-white p-6">
-            <DialogHeader>
-              <DialogTitle className="sr-only">Mobile Sidebar Menu</DialogTitle>
-            </DialogHeader>
-          <div className="mb-6">
-            <h2 className="text-3xl font-extrabold">Admin Dashboard</h2>
-            <p className="text-sm opacity-70">Manage your operations</p>
-          </div>
-          <nav className="space-y-4">
-            <Link href="#" onClick={() => handleSidebarClick('requests')} className="block px-4 py-2 rounded hover:bg-red-500">
-              Blood Requests
-            </Link>
-            <Link href="#" onClick={() => handleSidebarClick('camps')} className="block px-4 py-2 rounded hover:bg-red-500">
-              Blood Camps
-            </Link>
-            <Link href="#" onClick={() => handleSidebarClick('donors')} className="block px-4 py-2 rounded hover:bg-red-500">
-              Donors
-            </Link>
-            <Link href="#" onClick={() => handleSidebarClick('support')} className="block px-4 py-2 rounded hover:bg-red-500">
-              Support
-            </Link>
-          </nav>
-        </DialogContent>
-      </Dialog>
-
-      {/* Rejection Details Modal */}
-      <Dialog open={isRejectionDetailsModalOpen} onOpenChange={setIsRejectionDetailsModalOpen}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Rejection Details</DialogTitle>
-            <DialogDescription>
-              The following are the reasons provided for rejecting this request.
-            </DialogDescription>
-          </DialogHeader>
-          {loadingRejectionDetails ? (
-            <div className="flex justify-center items-center h-32">
-              <p>Loading details...</p>
-            </div>
-          ) : rejectionDetails.length > 0 ? (
-            <div className="space-y-4 max-h-96 overflow-y-auto">
-              {rejectionDetails.map((rejection) => (
-                <div key={rejection.id} className="p-4 border rounded-lg">
-                  <p className="font-semibold">Reason:</p>
-                  <p className="mb-2">{rejection.reason}</p>
-                  <p className="text-sm text-gray-500">
-                    Rejected by: {rejection.adminDetails.name || rejection.rejectedBy} on {new Date(rejection.rejectedAt.seconds * 1000).toLocaleDateString()}
-                  </p>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p>No rejection details found for this request.</p>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsRejectionDetailsModalOpen(false)}>Close</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Rejection Reason Modal */}
-      <Dialog open={showRejectionModal} onOpenChange={setShowRejectionModal}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Reject Request</DialogTitle>
-            <DialogDescription>
-              Please provide a reason for rejecting this request. This information will be stored for internal records.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="py-4">
-            <Textarea
-              placeholder="Enter rejection reason..."
-              value={rejectionReason}
-              onChange={(e) => setRejectionReason(e.target.value)}
-              className="min-h-[100px]"
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowRejectionModal(false)}>Cancel</Button>
-            <Button onClick={handleRejectionSubmit} disabled={loading}>
-              {loading ? 'Submitting...' : 'Submit Rejection'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Main Content */}
-      <div className="flex-1 p-6 md:p-10">
-        <div className="flex items-center justify-between mb-8">
-          <h1 className="text-4xl font-extrabold text-gray-800">
-          {
-  activeTab === 'requests'
-    ? 'Blood Requests'
-    : activeTab === 'camps'
-    ? 'Blood Camps'
-    : activeTab === 'support'
-    ? 'Support Inbox'
-    : 'Donors'
-}
-          </h1>
-          {assignedCity && (
-            <div className="px-4 py-2 bg-blue-100 text-blue-800 text-sm font-medium rounded-full">
-              Managing {assignedCity}
-            </div>
-          )}
-          <Button variant="outline" onClick={handleExport}>Export</Button>
-          <button className="md:hidden p-2 rounded bg-gray-200 hover:bg-gray-300 transition" onClick={() => setIsSidebarOpen(true)}>
-            <svg className="w-6 h-6 text-gray-800" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16"></path>
-            </svg>
-          </button>
-        </div>
-
-        {/* Sub-tabs for Requests */}
-        {activeTab === 'requests' && (
-          <div className="mb-4 flex space-x-4">
-            {[
-              { label: 'Current', value: 'received' },
-              { label: 'Ongoing', value: 'accepted' },
-              { label: 'Completed', value: 'completed' },
-              { label: 'Rejected', value: 'rejected' },
-              { label: 'All', value: 'all' }
-            ].map(tab => (
-              <button
-                key={tab.value}
-                onClick={() => { setActiveRequestFilter(tab.value); setCurrentPage(1) }}
-                className={`px-4 py-2 rounded ${
-                  activeRequestFilter === tab.value ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-800'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Sub-tabs for Camps */}
-        {activeTab === 'camps' && (
-          <div className="mb-4 flex space-x-4">
-            {[
-              { label: 'All Camps', value: 'all' },
-              { label: 'Upcoming', value: 'upcoming' },
-              { label: 'Ongoing', value: 'ongoing' },
-              { label: 'Completed', value: 'completed' }
-            ].map(tab => (
-              <button
-                key={tab.value}
-                onClick={() => { setActiveCampFilter(tab.value); setCurrentPage(1) }}
-                className={`px-4 py-2 rounded ${
-                  activeCampFilter === tab.value ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-800'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Blood Group Filter for Donors */}
-        {activeTab === 'donors' && (
-          <>
-            {/* Donor Statistics Cards - MOVED ABOVE FILTERS */}
-            <div className="mb-8">
-              <h3 className="text-xl font-bold text-gray-800 mb-4">Donor Statistics</h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                <div
-                  className={`bg-white rounded-xl shadow-md p-6 cursor-pointer transition-all ${
-                    activeDonorStatusFilter === 'all'
-                      ? 'ring-2 ring-red-500'
-                      : 'hover:shadow-lg'
-                  }`}
-                  onClick={() => setActiveDonorStatusFilter('all')}
-                >
-                  <h4 className="text-lg font-semibold text-gray-700 mb-2">Total Donors</h4>
-                  <p className="text-3xl font-bold text-red-600">{donors.length}</p>
-                </div>
-                <div
-                  className={`bg-white rounded-xl shadow-md p-6 cursor-pointer transition-all ${
-                    activeDonorStatusFilter === 'available'
-                      ? 'ring-2 ring-green-500'
-                      : 'hover:shadow-lg'
-                  }`}
-                  onClick={() => setActiveDonorStatusFilter('available')}
-                >
-                  <h4 className="text-lg font-semibold text-gray-700 mb-2">Available Donors</h4>
-                  <p className="text-3xl font-bold text-green-600">{donorStats.availableDonors}</p>
-                  <p className="text-sm text-gray-500">Eligible to donate now</p>
-                </div>
-                <div
-                  className={`bg-white rounded-xl shadow-md p-6 cursor-pointer transition-all ${
-                    activeDonorStatusFilter === 'unavailable'
-                      ? 'ring-2 ring-orange-500'
-                      : 'hover:shadow-lg'
-                  }`}
-                  onClick={() => setActiveDonorStatusFilter('unavailable')}
-                >
-                  <h4 className="text-lg font-semibold text-gray-700 mb-2">Unavailable Donors</h4>
-                  <p className="text-3xl font-bold text-orange-500">{donorStats.unavailableDonors}</p>
-                  <p className="text-sm text-gray-500">Recently donated (within 90 days)</p>
-                </div>
-              </div>
-              
-              <h3 className="text-xl font-bold text-gray-800 mb-4">Blood Group Distribution</h3>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-                {Object.entries(donorStats.byBloodGroup).map(([bloodGroup, stats]) => (
-                  stats.total > 0 && (
-                    <div key={bloodGroup} className="bg-white rounded-xl shadow-md p-4 border-l-4 border-red-500">
-                      <div className="flex justify-between items-center mb-2">
-                        <h4 className="text-xl font-bold text-red-600">{bloodGroup}</h4>
-                        <span className="px-2 py-1 bg-red-100 text-red-800 rounded-full text-sm">
-                          {stats.total} donors
-                        </span>
-                      </div>
-                      <div className="space-y-1">
-                        <div className="flex justify-between text-sm">
-                          <span className="text-gray-600">Available:</span>
-                          <span className="font-medium text-green-600">{stats.available}</span>
-                        </div>
-                        <div className="flex justify-between text-sm">
-                          <span className="text-gray-600">Unavailable:</span>
-                          <span className="font-medium text-orange-500">{stats.unavailable}</span>
-                        </div>
-                      </div>
-                    </div>
-                  )
-                ))}
-              </div>
-            </div>
-
-            <div className="mb-6 bg-white p-6 rounded-xl shadow-md">
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-xl font-bold text-gray-800">Donor Filters</h3>
-                <button
-                  onClick={() => {
-                    setActiveBloodGroupFilter('all');
-                    setActiveGenderFilter('all');
-                    setSearchQuery('');
-                    setCurrentPage(1);
-                  }}
-                  className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded transition flex items-center"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                  Reset Filters
-                </button>
-              </div>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <h3 className="text-lg font-semibold mb-2">Search Donors</h3>
-                  <div className="relative">
-                    <input
-                      type="text"
-                      placeholder="Search by name..."
-                      value={searchQuery}
-                      onChange={(e) => {
-                        setSearchQuery(e.target.value);
-                        setCurrentPage(1);
-                      }}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500"
-                    />
-                    {searchQuery && (
-                      <button 
-                        onClick={() => setSearchQuery('')}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                        </svg>
-                      </button>
-                    )}
-                  </div>
-                </div>
-                
-                <div>
-                  <h3 className="text-lg font-semibold mb-2">Filter by Gender</h3>
-                  <div className="flex flex-wrap gap-2">
-                    {[
-                      { label: 'All', value: 'all' },
-                      { label: 'Male', value: 'male' },
-                      { label: 'Female', value: 'female' }
-                    ].map(gender => (
-                      <button
-                        key={gender.value}
-                        onClick={() => { setActiveGenderFilter(gender.value); setCurrentPage(1) }}
-                        className={`px-4 py-2 rounded ${
-                          activeGenderFilter === gender.value ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-800'
-                        }`}
-                      >
-                        {gender.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                
-                <div>
-                  <h3 className="text-lg font-semibold mb-2">Filter by Blood Group</h3>
-                  <div className="flex flex-wrap gap-2">
-                    {[
-                      { label: 'All', value: 'all' },
-                      { label: 'A+', value: 'A+' },
-                      { label: 'A-', value: 'A-' },
-                      { label: 'B+', value: 'B+' },
-                      { label: 'B-', value: 'B-' },
-                      { label: 'AB+', value: 'AB+' },
-                      { label: 'AB-', value: 'AB-' },
-                      { label: 'O+', value: 'O+' },
-                      { label: 'O-', value: 'O-' }
-                    ].map(group => (
-                      <button
-                        key={group.value}
-                        onClick={() => { setActiveBloodGroupFilter(group.value); setCurrentPage(1) }}
-                        className={`px-4 py-2 rounded ${
-                          activeBloodGroupFilter === group.value ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-800'
-                        }`}
-                      >
-                        {group.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Data Table Section */}
-        {activeTab === 'requests' && (
-          <div className="bg-white rounded-xl shadow-lg p-8 mb-10">
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-left">
-                <thead>
-                  <tr className="bg-gray-100">
-                    <th className="px-6 py-3 font-semibold">Patient Name</th>
-                    <th className="px-6 py-3 font-semibold">Blood Group</th>
-                    <th className="px-6 py-3 font-semibold">Hospital</th>
-                    <th className="px-6 py-3 font-semibold">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {currentItems.map(request => (
-                    <tr key={request.id} className="border-b hover:bg-gray-50 transition">
-                      <td className="px-6 py-4">{request.PatientName}</td>
-                      <td className="px-6 py-4">{request.BloodGroup}</td>
-                      <td className="px-6 py-4">{request.Hospital}</td>
-                      <td className="px-6 py-4 flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-2">
-                        {request.Verified === "received" && (
-                          <>
-                            <Button onClick={() => handleConfirmAction(request.id, 'accepted')} className="w-full sm:w-auto bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded transition">
-                              Accept
-                            </Button>
-                            <Button onClick={() => handleConfirmAction(request.id, 'rejected')} className="w-full sm:w-auto bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded transition">
-                              Reject
-                            </Button>
-                          </>
-                        )}
-                        <Button onClick={() => openDetailsModal(request, 'request')} className="w-full sm:w-auto bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded transition">
-                          More
-                        </Button>
-                        {(request.Verified === "accepted" || request.Verified === "completed") && (
-                          <Button 
-                            onClick={() => {
-                              if (buttonLoadingId === request.id) return;
-                              setButtonLoadingId(request.id);
-                              openDonorsModal(request.id);
-                            }}
-                            className="bg-purple-500 hover:bg-purple-600 text-white px-4 py-2 rounded transition"
-                            disabled={buttonLoadingId === request.id}
-                          >
-                            {buttonLoadingId === request.id ? (
-                              <div className="flex items-center">
-                                <div className="animate-spin mr-2 h-4 w-4 border-2 border-white border-t-transparent rounded-full"></div>
-                                Loading
-                              </div>
-                            ) : (
-                              "View Donors"
-                            )}
-                          </Button>
-                        )}
-                        {activeRequestFilter !== 'received' && request.Verified !== 'rejected' && (
-                          <Button
-                            onClick={() => openCancelledModal(request.id)}
-                            className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded transition"
-                          >
-                            Cancelled Donors
-                          </Button>
-                        )}
-                        {request.Verified === 'rejected' && (
-                          <Button 
-                            variant="secondary" 
-                            onClick={() => openRejectionDetailsModal(request.id)}
-                            className="bg-yellow-400 hover:bg-yellow-500 text-white px-4 py-2 rounded transition"
-                          >
-                            View Reason
-                          </Button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'donors' && (
-          <div className="bg-white rounded-xl shadow-lg p-8 mb-10">
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-left">
-                <thead>
-                  <tr className="bg-gray-100">
-                    <th className="px-6 py-3 font-semibold">Profile</th>
-                    <th className="px-6 py-3 font-semibold">Name</th>
-                    <th className="px-6 py-3 font-semibold">Blood Group</th>
-                    <th className="px-6 py-3 font-semibold">Mobile</th>
-                    <th className="px-6 py-3 font-semibold">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {currentItems.map(donor => (
-                    <tr key={donor.id} className="border-b hover:bg-gray-50 transition">
-                      <td className="px-6 py-4">
-                        {donor.profile_picture ? (
-                          <Image 
-                            src={donor.profile_picture} 
-                            alt={donor.Name} 
-                            width={40} 
-                            height={40} 
-                            className="rounded-full object-cover"
-                          />
-                        ) : (
-                          <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
-                            <span className="text-red-600 font-semibold text-sm">
-                              {donor.Name && donor.Name.charAt(0).toUpperCase()}
-                            </span>
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-6 py-4">{donor.Name}</td>
-                      <td className="px-6 py-4">{donor.BloodGroup}</td>
-                      <td className="px-6 py-4">{donor.MobileNumber}</td>
-                      <td className="px-6 py-4">
-                        <Button onClick={() => openDetailsModal(donor, 'donor')} className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded transition">
-                          More
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'camps' && (
-          <div className="bg-white rounded-xl shadow-lg p-8 mb-10">
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-left">
-                <thead>
-                  <tr className="bg-gray-100">
-                    <th className="px-6 py-3 font-semibold">Camp Name</th>
-                    <th className="px-6 py-3 font-semibold">Date Range</th>
-                    <th className="px-6 py-3 font-semibold">Location</th>
-                    <th className="px-6 py-3 font-semibold">Status</th>
-                    <th className="px-6 py-3 font-semibold">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {currentItems.map(camp => (
-                    <tr key={camp.id} className="border-b hover:bg-gray-50 transition">
-                      <td className="px-6 py-4">{camp.CampName}</td>
-                      <td className="px-6 py-4">
-                        {new Date(camp.CampStart).toLocaleString()} - {new Date(camp.CampEnd).toLocaleString()}
-                      </td>
-                      <td className="px-6 py-4">{camp.CampLocation}</td>
-                      <td className="px-6 py-4 capitalize">{camp.CampStatus}</td>
-                      <td className="px-6 py-4">
-                        <Button onClick={() => openDetailsModal(camp, 'camp')} className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded transition">
-                          More
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'support' && (
-          <div className="bg-white rounded-xl shadow-lg p-8 mb-10">
-            <SupportPage />
-          </div>
-        )}
-
-        {/* Pagination */}
-        {(
-          <div className="flex justify-center mt-8">
-            <div className="space-x-4">
-              <button
-                className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 transition disabled:opacity-50"
-                disabled={currentPage === 1}
-                onClick={() => setCurrentPage(prev => prev - 1)}
-              >
-                Previous
-              </button>
-              <button
-                className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 transition disabled:opacity-50"
-                disabled={currentItems.length < itemsPerPage}
-                onClick={() => setCurrentPage(prev => prev + 1)}
-              >
-                Next
-              </button>
-              <span className="px-4 py-2">
-                Page {currentPage} • {filteredData.length} {
-  activeTab === 'requests' 
-    ? 'Requests' 
-    : activeTab === 'donors' 
-    ? 'Donors' 
-    : activeTab === 'support' 
-    ? 'Queries' 
-    : 'Camps'
-}
-
-              </span>
-            </div>
-          </div>
-        )}
-
-        {/* Original Confirm Dialog */}
-        <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
-          <DialogContent className="sm:max-w-[400px]">
-            <DialogHeader>
-              <DialogTitle className="text-2xl font-bold">
-                {actionType === 'accepted'
-                  ? 'Confirm Accept'
-                  : actionType === 'rejected'
-                  ? 'Confirm Reject'
-                  : 'Confirm Complete'}
-              </DialogTitle>
-            </DialogHeader>
-            <p>{confirmModal.message}</p>
-            <div className="mt-4 flex flex-col sm:flex-row justify-end space-y-2 sm:space-y-0 sm:space-x-2">
-              <Button variant="outline" onClick={() => setShowConfirmDialog(false)}>
-                Cancel
-              </Button>
-              <Button onClick={handleConfirm}>
-                Confirm
-              </Button>
-            </div>
-          </DialogContent>
-        </Dialog>
-
-        {/* Add Emergency Level Dialog */}
-        <Dialog open={showEmergencyDialog} onOpenChange={setShowEmergencyDialog}>
-          <DialogContent className="bg-white rounded-lg shadow-xl max-w-md mx-auto">
-            <DialogHeader>
-              <DialogTitle className="text-2xl font-bold text-gray-800">Select Emergency Level</DialogTitle>
-            </DialogHeader>
-            <div className="p-6">
-              <p className="text-gray-600 mb-6">Please select the emergency level for this request before accepting:</p>
-              
-              <div className="space-y-4 mb-6">
-                <div 
-                  className={`p-4 rounded-lg cursor-pointer border-2 ${emergencyLevel === 'high' ? 'border-red-600 bg-red-50' : 'border-gray-200 hover:border-red-300'}`}
-                  onClick={() => setEmergencyLevel('high')}
-                >
-                  <div className="flex items-center">
-                    <div className="w-4 h-4 rounded-full bg-red-600 mr-3"></div>
-                    <div>
-                      <p className="font-semibold text-gray-800">High Emergency</p>
-                      <p className="text-sm text-gray-600">Critical condition, urgent attention needed</p>
-                    </div>
-                  </div>
-                </div>
-                
-                <div 
-                  className={`p-4 rounded-lg cursor-pointer border-2 ${emergencyLevel === 'medium' ? 'border-orange-500 bg-orange-50' : 'border-gray-200 hover:border-orange-300'}`}
-                  onClick={() => setEmergencyLevel('medium')}
-                >
-                  <div className="flex items-center">
-                    <div className="w-4 h-4 rounded-full bg-orange-500 mr-3"></div>
-                    <div>
-                      <p className="font-semibold text-gray-800">Medium Emergency</p>
-                      <p className="text-sm text-gray-600">Requires prompt attention</p>
-                    </div>
-                  </div>
-                </div>
-                
-                <div 
-                  className={`p-4 rounded-lg cursor-pointer border-2 ${emergencyLevel === 'low' ? 'border-yellow-500 bg-yellow-50' : 'border-gray-200 hover:border-yellow-300'}`}
-                  onClick={() => setEmergencyLevel('low')}
-                >
-                  <div className="flex items-center">
-                    <div className="w-4 h-4 rounded-full bg-yellow-500 mr-3"></div>
-                    <div>
-                      <p className="font-semibold text-gray-800">Low Emergency</p>
-                      <p className="text-sm text-gray-600">Standard procedure, not time-critical</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              
-              <div className="flex justify-end space-x-4">
-                <Button
-                  variant="outline"
-                  onClick={() => setShowEmergencyDialog(false)}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={() => {
-                    if (!emergencyLevel) {
-                      toast.error('Please select an emergency level');
-                      return;
-                    }
-                    updateRequestStatus(actionId, 'accepted', emergencyLevel);
-                    setShowEmergencyDialog(false);
-                  }}
-                  disabled={!emergencyLevel}
-                >
-                  Accept Request
-                </Button>
-              </div>
-            </div>
-          </DialogContent>
-        </Dialog>
-
-        {/* Details Modal */}
-        <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-          <DialogContent
-            className={
-              `sm:max-w-[600px] ${showCreatedBy ? 'max-h-[80vh] overflow-y-auto' : ''}`
-            }
-          >
-            <DialogHeader>
-              <DialogTitle className="text-2xl font-bold">
-                {modalType === 'request' ? 'Request Details' : 
-                 modalType === 'donor' ? 'Donor Details' : 'Camp Details'}
-              </DialogTitle>
-            </DialogHeader>
-            <div className="p-6">
-              {selectedItem && (
-                <div className="space-y-4 mt-4">
-                  {modalType === 'request' ? (
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <p className="font-semibold">Attender Mobile</p>
-                        <p>{selectedItem.AttenderMobile}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Attender Name</p>
-                        <p>{selectedItem.AttenderName}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Blood Group</p>
-                        <p>{selectedItem.BloodGroup}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">City</p>
-                        <p>{selectedItem.City}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Country</p>
-                        <p>{selectedItem.Country}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Gender</p>
-                        <p>{selectedItem.Gender}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Hospital</p>
-                        <p>{selectedItem.Hospital}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Patient Age</p>
-                        <p>{selectedItem.PatientAge}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Patient Name</p>
-                        <p>{selectedItem.PatientName}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Reason</p>
-                        <p>{selectedItem.Reason}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">State</p>
-                        <p>{selectedItem.State}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Units Needed</p>
-                        <p>{selectedItem.UnitsNeeded}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Units Donated</p>
-                        <p>{selectedItem.UnitsDonated || 0}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Verified</p>
-                        <p>{selectedItem.Verified}</p>
-                      </div>
-                      {selectedItem.EmergencyLevel && (
-                        <div>
-                          <p className="font-semibold">Emergency Level</p>
-                          <p className="capitalize">{selectedItem.EmergencyLevel}</p>
-                        </div>
-                      )}
-                      {/* Created By Toggle */}
-                      <div className="col-span-2">
-                        <Button
-                          variant="outline"
-                          className="mt-4"
-                          onClick={() => handleToggleCreatedBy(selectedItem.uuid)}
-                        >
-                          {showCreatedBy ? 'Hide Creator Info' : 'Created By'}
-                        </Button>
-
-                        {showCreatedBy && (
-                          <div className="mt-4">
-                            {loadingCreatedBy ? (
-                              <p>Loading...</p>
-                            ) : createdByInfo ? (
-                              <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                  <p className="font-semibold">Name</p>
-                                  <p>{createdByInfo.Name}</p>
-                                </div>
-                                <div>
-                                  <p className="font-semibold">Email</p>
-                                  <p>{createdByInfo.Email}</p>
-                                </div>
-                                <div>
-                                  <p className="font-semibold">Blood Group</p>
-                                  <p>{createdByInfo.BloodGroup}</p>
-                                </div>
-                                <div>
-                                  <p className="font-semibold">Gender</p>
-                                  <p>{createdByInfo.Gender}</p>
-                                </div>
-                              </div>
-                            ) : (
-                              <p className="text-gray-600">No creator information found.</p>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ) : modalType === 'donor' ? (
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="col-span-2 flex justify-center mb-4">
-                        {selectedItem.profile_picture ? (
-                          <Image 
-                            src={selectedItem.profile_picture} 
-                            alt={selectedItem.Name} 
-                            width={100} 
-                            height={100} 
-                            className="rounded-full object-cover border-4 border-red-100"
-                          />
-                        ) : (
-                          <div className="w-24 h-24 rounded-full bg-red-100 flex items-center justify-center">
-                            <span className="text-red-600 font-bold text-2xl">
-                              {selectedItem.Name && selectedItem.Name.charAt(0).toUpperCase()}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                      <div>
-                        <p className="font-semibold">Name</p>
-                        <p>{selectedItem.Name}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Blood Group</p>
-                        <p>{selectedItem.BloodGroup}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Email</p>
-                        <p>{selectedItem.Email}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Mobile</p>
-                        <p>{selectedItem.MobileNumber}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Permanent City</p>
-                        <p className="text-gray-700">{selectedItem.PermanentCity || 'Not provided'}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Residential City</p>
-                        <p className="text-gray-700">{selectedItem.ResidentCity || 'Not provided'}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">State</p>
-                        <p>{selectedItem.State}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Whatsapp Number</p>
-                        <p>{selectedItem.WhatsappNumber}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Last Donation Date</p>
-                        <p>
-                          {selectedItem.lastDonationDate
-                            ? new Date(
-                                selectedItem.lastDonationDate.toDate
-                                  ? selectedItem.lastDonationDate.toDate()
-                                  : selectedItem.lastDonationDate
-                              ).toLocaleDateString()
-                            : 'N/A'}
-                        </p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <p className="font-semibold">Camp Name</p>
-                        <p>{selectedItem.CampName}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Camp Start</p>
-                        <p>{new Date(selectedItem.CampStart).toLocaleString()}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Camp End</p>
-                        <p>{new Date(selectedItem.CampEnd).toLocaleString()}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Location</p>
-                        <p>{selectedItem.CampLocation}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">City</p>
-                        <p>{selectedItem.CampCity}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">State</p>
-                        <p>{selectedItem.CampState}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Country</p>
-                        <p>{selectedItem.CampCountry}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Target Units</p>
-                        <p>{selectedItem.TargetBloodUnits}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Alternative Contact</p>
-                        <p>{selectedItem.AlternativeContact}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Description</p>
-                        <p>{selectedItem.CampDescription}</p>
-                      </div>
-                      <div>
-                        <p className="font-semibold">Status</p>
-                        <p className="capitalize">{selectedItem.CampStatus}</p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </DialogContent>
-        </Dialog>
-
-        {/* Cancelled Donors Modal */}
-        <Dialog open={isCancelledModalOpen} onOpenChange={setIsCancelledModalOpen}>
-          <DialogContent className="sm:max-w-[600px]">
-            <DialogHeader>
-              <DialogTitle className="text-2xl font-bold">Cancelled Donors</DialogTitle>
-            </DialogHeader>
-            {loadingCancelled ? (
-              <div className="flex justify-center py-8">
-                <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-yellow-500"></div>
-              </div>
-            ) : requestCancellations.length === 0 ? (
-              <div className="text-center py-8">
-                <p className="text-gray-500">No cancelled donors found for this request.</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {requestCancellations.map((cancellation, index) => (
-                  <div key={cancellation.id} className="border rounded-lg overflow-hidden">
-                    <div className="p-4 bg-gray-50 border-b">
-                      <h3 className="font-bold text-lg text-gray-800">
-                        Cancellation #{index + 1}: {cancellation.donorName || 'Unknown Donor'}
-                      </h3>
-                    </div>
-                    <div className="p-4 bg-white">
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {cancellation.donorDetails && (
-                          <>
-                            <div>
-                              <p className="text-sm font-medium text-gray-500">Blood Group</p>
-                              <p className="font-medium">{cancellation.donorDetails.BloodGroup || 'N/A'}</p>
-                            </div>
-                            <div>
-                              <p className="text-sm font-medium text-gray-500">Age</p>
-                              <p className="font-medium">{cancellation.donorDetails.Age || 'N/A'}</p>
-                            </div>
-                            <div>
-                              <p className="text-sm font-medium text-gray-500">Gender</p>
-                              <p className="font-medium capitalize">{cancellation.donorDetails.Gender || 'N/A'}</p>
-                            </div>
-                            <div>
-                              <p className="text-sm font-medium text-gray-500">Phone</p>
-                              <p className="font-medium">{cancellation.donorDetails.MobileNumber || 'N/A'}</p>
-                            </div>
-                          </>
-                        )}
-                        <div>
-                          <p className="text-sm font-medium text-gray-500">Donor Email</p>
-                          <p className="text-gray-900">{cancellation.donorEmail || 'N/A'}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-gray-500">Cancelled On</p>
-                          <p className="text-gray-900">
-                            {cancellation.timestamp
-                              ? new Date(
-                                  cancellation.timestamp.toDate
-                                    ? cancellation.timestamp.toDate()
-                                    : cancellation.timestamp
-                                ).toLocaleString()
-                              : 'N/A'}
-                          </p>
-                        </div>
-                        <div className="md:col-span-2">
-                          <p className="text-sm font-medium text-gray-500">Reason for Cancellation</p>
-                          <p className="text-gray-900">{cancellation.reason || 'No reason provided'}</p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </DialogContent>
-        </Dialog>
-
-        {/* Add new Donors Modal */}
-        <Dialog open={isDonorsModalOpen} onOpenChange={setIsDonorsModalOpen}>
-          <DialogContent className="sm:max-w-[700px] max-h-[80vh] overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle className="text-2xl font-bold">Donor Information</DialogTitle>
-            </DialogHeader>
-            {loadingDonors ? (
-              <div className="flex justify-center py-8">
-                <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
-              </div>
-            ) : selectedRequestDonors.length === 0 ? (
-              <div className="text-center py-8">
-                <p className="text-gray-500">No donations found for this request.</p>
-              </div>
-            ) : (
-              <div className="space-y-6">
-                <div className="bg-blue-50 p-3 rounded-lg border border-blue-100">
-                  <p className="text-blue-800 text-sm">
-                    <span className="font-medium">Note:</span> Showing {selectedRequestDonors.length} donation record(s).
-                  </p>
-                </div>
-                
-                {selectedRequestDonors.map((donation, index) => (
-                  <div key={donation.id} className="border rounded-lg overflow-hidden">
-                    <div className={`p-4 ${donation.donorOtpVerified ? 'bg-green-50' : 'bg-yellow-50'}`}>
-                      <div className="flex justify-between items-center">
-                        <h3 className="font-bold text-lg">
-                          Donor #{index + 1}: {donation.donorDetails?.Name || donation.donorName || 'Unknown'}
-                        </h3>
-                        <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
-                          donation.donorOtpVerified 
-                            ? 'bg-green-100 text-green-800 border border-green-200' 
-                            : 'bg-yellow-100 text-yellow-800 border border-yellow-200'
-                        }`}>
-                          {donation.donorOtpVerified ? 'Donation Complete' : 'Donation Pending'}
-                        </span>
-                      </div>
-                    </div>
-                    
-                    <div className="p-4 bg-white">
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {donation.donorDetails && (
-                          <>
-                            <div>
-                              <p className="text-sm font-medium text-gray-500">Blood Group</p>
-                              <p className="font-medium">{donation.donorDetails.BloodGroup}</p>
-                            </div>
-                            <div>
-                              <p className="text-sm font-medium text-gray-500">Age</p>
-                              <p className="font-medium">{donation.donorDetails.Age}</p>
-                            </div>
-                            <div>
-                              <p className="text-sm font-medium text-gray-500">Gender</p>
-                              <p className="font-medium capitalize">{donation.donorDetails.Gender}</p>
-                            </div>
-                          </>
-                        )}
-                        <div>
-                          <p className="text-sm font-medium text-gray-500">Email</p>
-                          <p className="font-medium">{donation.donorEmail || 'Not available'}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-gray-500">Phone</p>
-                          <p className="font-medium">{donation.donorDetails?.MobileNumber || 'Not available'}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-gray-500">Donation Date</p>
-                          <p className="font-medium">
-                            {donation.timestamp ? new Date(donation.timestamp.toDate ? donation.timestamp.toDate() : donation.timestamp).toLocaleString() : 'Not recorded'}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-gray-500">OTP Status</p>
-                          <div className="flex space-x-2 mb-2">
-                            <span className={`px-2 py-0.5 rounded-full text-xs ${
-                              donation.requesterOtpVerified ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
-                            }`}>
-                              Requester: {donation.requesterOtpVerified ? 'Verified' : 'Pending'}
-                            </span>
-                            <span className={`px-2 py-0.5 rounded-full text-xs ${
-                              donation.donorOtpVerified ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
-                            }`}>
-                              Donor: {donation.donorOtpVerified ? 'Verified' : 'Pending'}
-                            </span>
-                          </div>
-                          <div className="grid grid-cols-2 gap-4">
-                            <div>
-                              <p className="text-sm font-medium text-gray-500">Requester OTP</p>
-                              <p className="font-medium">{donation.requesterOtp || 'Not generated'}</p>
-                            </div>
-                            <div>
-                              <p className="text-sm font-medium text-gray-500">Donor OTP</p>
-                              <p className="font-medium">{donation.donorOtp || 'Not generated'}</p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </DialogContent>
-        </Dialog>
-      </div>
-    </div>
-  )
+      )}
+    </AdminShell>
+  );
 }

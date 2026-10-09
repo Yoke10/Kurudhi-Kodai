@@ -9,71 +9,29 @@ import {
   onSnapshot,
   doc,
   getDoc,
-  getDocs,
-  runTransaction,
-  serverTimestamp,
-  updateDoc
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import Navbar from '@/components/Navbar';
-import { generateSecure4DigitOtp, hashOtp, verifyOtpAttempt, OTP_EXPIRY_MINUTES, MAX_OTP_ATTEMPTS } from '@/lib/otpService';
-import { logAuditEvent, AUDIT_ACTIONS } from '@/lib/auditLogger';
-import { sendNotification, NOTIFICATION_TYPES } from '@/lib/notifications';
+import DualOtpVerification from '@/components/donations/DualOtpVerification';
+import StatusBadge from '@/components/ui/StatusBadge';
+import {
+  isRequestActive,
+  isRequestFullyCompleted,
+  isRequestCancelled,
+} from '@/lib/requestStateMachine';
+import {
+  isDonationActive,
+  isDonationCompleted,
+  isDonationCancelled,
+} from '@/lib/donationStateMachine';
+import { cancelRequesterRequest } from '@/lib/donationService';
 import {
   Activity, Check, ChevronDown, ChevronRight, Clock, Droplet,
-  FileText, HeartHandshake, ListChecks, Users, Hospital, MapPin, AlertCircle
+  FileText, HeartHandshake, ListChecks, Users, Hospital, MapPin, AlertCircle, XCircle
 } from 'lucide-react';
 import Link from 'next/link';
 
-// 4-Digit OTP Input
-function OtpInput({ length = 4, onChange }) {
-  const [otp, setOtp] = useState(new Array(length).fill(""));
-  const inputRefs = useRef([]);
-
-  useEffect(() => {
-    onChange(otp.join(""));
-  }, [otp, onChange]);
-
-  const handleChange = (e, index) => {
-    const val = e.target.value.replace(/\D/g, "");
-    if (!val && val !== "") return;
-
-    const newOtp = [...otp];
-    newOtp[index] = val.slice(-1);
-    setOtp(newOtp);
-
-    if (val && index < length - 1) {
-      inputRefs.current[index + 1]?.focus();
-    }
-  };
-
-  const handleKeyDown = (e, index) => {
-    if (e.key === 'Backspace' && !otp[index] && index > 0) {
-      inputRefs.current[index - 1]?.focus();
-    }
-  };
-
-  return (
-    <div className="flex justify-center gap-3">
-      {otp.map((digit, index) => (
-        <input
-          key={index}
-          ref={(el) => (inputRefs.current[index] = el)}
-          type="text"
-          inputMode="numeric"
-          maxLength={1}
-          className="w-12 h-12 text-center text-xl font-bold border-2 border-red-300 rounded-xl bg-white text-gray-900 shadow-sm focus:border-red-600 focus:outline-none"
-          value={digit}
-          onChange={(e) => handleChange(e, index)}
-          onKeyDown={(e) => handleKeyDown(e, index)}
-          autoFocus={index === 0}
-        />
-      ))}
-    </div>
-  );
-}
 
 export default function MyRequestsPage() {
   const { user } = useAuth();
@@ -83,6 +41,7 @@ export default function MyRequestsPage() {
     total: 0,
     active: 0,
     fulfilled: 0,
+    cancelled: 0,
     unitsDonated: 0,
   });
 
@@ -97,7 +56,7 @@ export default function MyRequestsPage() {
       const list1 = snap1.docs.map(d => ({ id: d.id, ...d.data() }));
 
       // Also get legacy matching requests
-      onSnapshot(q2, (snap2) => {
+      const unsub2 = onSnapshot(q2, (snap2) => {
         const list2 = snap2.docs.map(d => ({ id: d.id, ...d.data() }));
         // Merge without duplicates
         const map = new Map();
@@ -116,12 +75,17 @@ export default function MyRequestsPage() {
 
         let activeCount = 0;
         let fulfilledCount = 0;
+        let cancelledCount = 0;
         let donatedSum = 0;
 
         combined.forEach(req => {
-          const st = (req.status || req.Verified || '').toLowerCase();
-          if (st === 'fulfilled' || st === 'completed') fulfilledCount++;
-          else if (st !== 'cancelled' && st !== 'rejected') activeCount++;
+          if (isRequestFullyCompleted(req)) {
+            fulfilledCount++;
+          } else if (isRequestCancelled(req)) {
+            cancelledCount++;
+          } else if (isRequestActive(req)) {
+            activeCount++;
+          }
 
           donatedSum += parseInt(req.unitsDonated || req.UnitsDonated || 0, 10);
         });
@@ -130,18 +94,21 @@ export default function MyRequestsPage() {
           total: combined.length,
           active: activeCount,
           fulfilled: fulfilledCount,
+          cancelled: cancelledCount,
           unitsDonated: donatedSum,
         });
       });
+
+      return () => unsub2();
     });
 
     return () => unsub1();
   }, [user]);
 
   const filtered = myRequests.filter(req => {
-    const st = (req.status || req.Verified || '').toLowerCase();
-    if (activeTab === 'active') return st === 'active' || st === 'accepted' || st === 'matching' || st === 'received';
-    if (activeTab === 'fulfilled') return st === 'fulfilled' || st === 'completed';
+    if (activeTab === 'active') return isRequestActive(req);
+    if (activeTab === 'fulfilled') return isRequestFullyCompleted(req);
+    if (activeTab === 'cancelled') return isRequestCancelled(req);
     return true;
   });
 
@@ -213,6 +180,14 @@ export default function MyRequestsPage() {
           >
             Fulfilled ({stats.fulfilled})
           </button>
+          <button
+            onClick={() => setActiveTab('cancelled')}
+            className={`py-3 px-5 font-bold text-sm border-b-2 transition-colors ${
+              activeTab === 'cancelled' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-800'
+            }`}
+          >
+            Cancelled ({stats.cancelled})
+          </button>
         </div>
 
         {/* List of Requests */}
@@ -238,6 +213,10 @@ export default function MyRequestsPage() {
 function RequesterRequestCard({ request, currentUser }) {
   const [isExpanded, setIsExpanded] = useState(true);
   const [donations, setDonations] = useState([]);
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState('');
 
   useEffect(() => {
     const donRef = collection(db, 'requests', request.id, 'donations');
@@ -249,22 +228,64 @@ function RequesterRequestCard({ request, currentUser }) {
 
   const unitsNeeded = parseInt(request.unitsNeeded || request.UnitsNeeded || 1, 10);
   const unitsDonated = parseInt(request.unitsDonated || request.UnitsDonated || 0, 10);
-  const isFulfilled = unitsDonated >= unitsNeeded;
+  const isFulfilled = isRequestFullyCompleted(request);
+  const isCancelled = isRequestCancelled(request);
+  const isActive = isRequestActive(request);
+  const canCancel = !isCancelled && !isFulfilled;
+
+  const activeDonations = donations.filter(d => isDonationActive(d));
+  const completedDonations = donations.filter(d => isDonationCompleted(d));
+  const cancelledDonations = donations.filter(d => isDonationCancelled(d));
+
+  const handleCancelRequest = async () => {
+    if (!currentUser?.uid || !cancelReason.trim()) return;
+    setIsCancelling(true);
+    setCancelError('');
+    try {
+      await cancelRequesterRequest({
+        requestId: request.id,
+        requesterUid: currentUser.uid,
+        reason: cancelReason.trim(),
+      });
+      setShowCancelModal(false);
+      setCancelReason('');
+    } catch (err) {
+      console.error('Cancel request error:', err);
+      setCancelError(err.message || 'Failed to cancel request.');
+    } finally {
+      setIsCancelling(false);
+    }
+  };
 
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
       <div className="p-5 cursor-pointer bg-white" onClick={() => setIsExpanded(!isExpanded)}>
         <div className="flex items-start justify-between gap-4">
           <div className="flex-1">
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-center gap-2 mb-1 flex-wrap">
               <span className="font-extrabold text-lg text-gray-900">
                 {request.patientName || request.PatientName}
               </span>
               <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider ${
-                isFulfilled ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
+                isCancelled
+                  ? 'bg-gray-100 text-gray-700'
+                  : isFulfilled
+                  ? 'bg-green-100 text-green-800'
+                  : 'bg-amber-100 text-amber-800'
               }`}>
-                {isFulfilled ? 'Fulfilled' : 'Active Matching'}
+                {isCancelled ? 'Cancelled' : isFulfilled ? 'Fulfilled' : 'Active Matching'}
               </span>
+              {canCancel && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowCancelModal(true);
+                  }}
+                  className="text-xs text-red-600 hover:text-red-800 font-bold ml-2 underline"
+                >
+                  Cancel Request
+                </button>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center text-xs text-gray-500 gap-y-1 gap-x-3 mt-1.5">
@@ -298,27 +319,121 @@ function RequesterRequestCard({ request, currentUser }) {
 
       {isExpanded && (
         <div className="p-5 bg-gray-50/70 border-t border-gray-100 space-y-4">
-          <h4 className="font-bold text-gray-800 text-xs uppercase tracking-wider flex items-center gap-2">
-            <Users className="w-4 h-4 text-gray-500" />
-            Matched Donors ({donations.length})
-          </h4>
-
-          {donations.length > 0 ? (
-            <div className="space-y-3">
-              {donations.map(don => (
-                <RequesterDonationItem
-                  key={don.id}
-                  donation={don}
-                  request={request}
-                  currentUser={currentUser}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="bg-white rounded-xl border border-gray-200 p-6 text-center text-xs text-gray-500">
-              No donors have pledged yet. We are actively matching your request with eligible local donors.
+          {isCancelled && (
+            <div className="p-3.5 bg-gray-100 border border-gray-200 rounded-xl text-xs text-gray-700 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <XCircle className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                <span>This blood request was cancelled by you. Associated donor commitments have been released, and OTP operations are disabled.</span>
+              </div>
+              {request.cancellationReason && (
+                <span className="italic text-gray-500 text-[11px] ml-2">Reason: {request.cancellationReason}</span>
+              )}
             </div>
           )}
+
+          {/* Active Pledges */}
+          <div>
+            <h4 className="font-bold text-gray-800 text-xs uppercase tracking-wider flex items-center gap-2 mb-3">
+              <Users className="w-4 h-4 text-gray-500" />
+              Active Matched Donors ({activeDonations.length})
+            </h4>
+
+            {activeDonations.length > 0 ? (
+              <div className="space-y-3">
+                {activeDonations.map(don => (
+                  <RequesterDonationItem
+                    key={don.id}
+                    donation={don}
+                    request={request}
+                    currentUser={currentUser}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="bg-white rounded-xl border border-gray-200 p-5 text-center text-xs text-gray-500">
+                {isCancelled
+                  ? 'No active donor commitments remain for this cancelled request.'
+                  : isFulfilled
+                  ? 'All required units have been fulfilled.'
+                  : 'No active donor pledges at the moment. We are matching your request with eligible local donors.'}
+              </div>
+            )}
+          </div>
+
+          {/* Completed Donations History */}
+          {completedDonations.length > 0 && (
+            <div className="pt-2">
+              <h4 className="font-bold text-green-800 text-xs uppercase tracking-wider flex items-center gap-2 mb-3">
+                <Check className="w-4 h-4 text-green-600" />
+                Completed Donations ({completedDonations.length})
+              </h4>
+              <div className="space-y-3">
+                {completedDonations.map(don => (
+                  <RequesterDonationItem
+                    key={don.id}
+                    donation={don}
+                    request={request}
+                    currentUser={currentUser}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Cancelled Donations History */}
+          {cancelledDonations.length > 0 && (
+            <div className="pt-2">
+              <h4 className="font-bold text-gray-500 text-xs uppercase tracking-wider flex items-center gap-2 mb-2">
+                <XCircle className="w-4 h-4 text-gray-400" />
+                Cancelled Pledges ({cancelledDonations.length})
+              </h4>
+              <div className="space-y-2">
+                {cancelledDonations.map(don => (
+                  <RequesterDonationItem
+                    key={don.id}
+                    donation={don}
+                    request={request}
+                    currentUser={currentUser}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Cancel Request Modal */}
+      {showCancelModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+            <h3 className="font-bold text-gray-900 text-base mb-2">Cancel Blood Request</h3>
+            <p className="text-xs text-gray-500 mb-4">
+              Cancelling will release any pledged donors and permanently close this request. Please specify a reason.
+            </p>
+            <textarea
+              rows={3}
+              value={cancelReason}
+              onChange={(e) => setCancelReason(e.target.value)}
+              placeholder="e.g. Patient received blood from hospital bank, requirement postponed..."
+              className="w-full p-2.5 border border-gray-300 rounded-lg text-xs focus:ring-1 focus:ring-red-500"
+            />
+            {cancelError && (
+              <p className="text-xs text-red-600 font-medium mt-2">{cancelError}</p>
+            )}
+            <div className="flex justify-end gap-2 mt-4">
+              <Button variant="outline" size="sm" onClick={() => setShowCancelModal(false)}>
+                Back
+              </Button>
+              <Button
+                size="sm"
+                className="bg-red-600 hover:bg-red-700 text-white"
+                disabled={isCancelling || !cancelReason.trim()}
+                onClick={handleCancelRequest}
+              >
+                {isCancelling ? 'Cancelling...' : 'Confirm Cancel'}
+              </Button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -327,11 +442,6 @@ function RequesterRequestCard({ request, currentUser }) {
 
 // Subcomponent: Verification Card for Requester to confirm a Donor
 function RequesterDonationItem({ donation, request, currentUser }) {
-  const [enteredOtp, setEnteredOtp] = useState("");
-  const [requesterVerbalOtp, setRequesterVerbalOtp] = useState("");
-  const [isGeneratingOtp, setIsGeneratingOtp] = useState(false);
-  const [otpError, setOtpError] = useState("");
-  const [isVerifying, setIsVerifying] = useState(false);
   const [donorDetails, setDonorDetails] = useState(null);
 
   useEffect(() => {
@@ -350,233 +460,82 @@ function RequesterDonationItem({ donation, request, currentUser }) {
     fetchDonor();
   }, [donation]);
 
-  // Generate / reveal verbal code directly via authenticated session to give to donor
-  const handleGenerateRequesterOtp = async () => {
-    if (!donation || !currentUser) return;
-    setIsGeneratingOtp(true);
-    setOtpError("");
-    try {
-      const rawRequesterOtp = generateSecure4DigitOtp();
-      const requesterOtpHash = await hashOtp(rawRequesterOtp);
-      const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+  const donorName = donation.donorName || donorDetails?.name || donorDetails?.Name || 'Anonymous Donor';
+  const donorContact = donorDetails?.mobile || donorDetails?.MobileNumber || donation.donorEmail || 'Contact available';
+  const donorBlood = donation.donorBloodGroup || donorDetails?.bloodGroup || donorDetails?.BloodGroup || request.bloodGroup;
 
-      await updateDoc(doc(db, "requests", request.id, "donations", donation.id), {
-        requesterOtpHash,
-        requesterOtpExpiresAt: expiresAt,
-        requesterOtpAttemptsRemaining: MAX_OTP_ATTEMPTS,
-        requesterOtpVerified: false,
-        status: 'OTP_PENDING',
-        updatedAt: serverTimestamp(),
-      });
+  const isCompleted = isDonationCompleted(donation);
+  const isCancelled = isDonationCancelled(donation);
+  const isActive = isDonationActive(donation);
 
-      setRequesterVerbalOtp(rawRequesterOtp);
-      setDonation(prev => ({
-        ...prev,
-        requesterOtpHash,
-        requesterOtpExpiresAt: expiresAt,
-        requesterOtpAttemptsRemaining: MAX_OTP_ATTEMPTS,
-      }));
-    } catch (err) {
-      console.error('Error generating requester verbal code:', err);
-      alert(err.message || 'Error generating confirmation code.');
-    } finally {
-      setIsGeneratingOtp(false);
-    }
-  };
-
-  // Verify donor's verbal code directly via authenticated atomic transaction
-  const handleVerifyDonorOtp = async () => {
-    if (!enteredOtp || enteredOtp.length !== 4) return;
-    setIsVerifying(true);
-    setOtpError("");
-
-    try {
-      const cleanOtp = enteredOtp.trim();
-      const storedHash = donation.donorOtpHash;
-      const rawExpiry = donation.donorOtpExpiresAt;
-      const attemptsRemaining = donation.donorOtpAttemptsRemaining ?? MAX_OTP_ATTEMPTS;
-
-      if (!storedHash) {
-        setOtpError("The donor has not generated their 4-digit code yet.");
-        setIsVerifying(false);
-        return;
-      }
-
-      const verifyResult = await verifyOtpAttempt({
-        enteredOtp: cleanOtp,
-        storedOtpOrHash: storedHash,
-        expiresAt: rawExpiry,
-        attemptsRemaining,
-        isHashed: true,
-      });
-
-      if (!verifyResult.success) {
-        await updateDoc(doc(db, "requests", request.id, "donations", donation.id), {
-          donorOtpAttemptsRemaining: verifyResult.attemptsRemaining,
-          updatedAt: serverTimestamp(),
-        });
-        setOtpError(verifyResult.error || "Incorrect code");
-        setIsVerifying(false);
-        return;
-      }
-
-      // Code matched! Execute atomic transaction guaranteeing unitsDonated <= unitsNeeded
-      await runTransaction(db, async (transaction) => {
-        const reqRef = doc(db, "requests", request.id);
-        const donRef = doc(db, "requests", request.id, "donations", donation.id);
-
-        const reqSnap = await transaction.get(reqRef);
-        if (!reqSnap.exists()) {
-          throw new Error("Blood request not found");
-        }
-
-        const reqData = reqSnap.data();
-        const currentUnits = Number(reqData.unitsDonated || reqData.UnitsDonated || 0);
-        const unitsNeeded = Number(reqData.unitsNeeded || reqData.UnitsNeeded || 1);
-
-        if (currentUnits >= unitsNeeded) {
-          throw new Error("This blood request has already been fully fulfilled.");
-        }
-
-        const newUnits = currentUnits + 1;
-        const isFulfilled = newUnits >= unitsNeeded;
-
-        transaction.update(reqRef, {
-          unitsDonated: newUnits,
-          UnitsDonated: newUnits,
-          status: isFulfilled ? 'FULFILLED' : 'PARTIALLY_FULFILLED',
-          updatedAt: serverTimestamp(),
-        });
-
-        transaction.update(donRef, {
-          requesterOtpVerified: true,
-          completed: true,
-          status: 'DONATION_COMPLETED',
-          completedAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      });
-
-      setDonation(prev => ({
-        ...prev,
-        requesterOtpVerified: true,
-        completed: true,
-        status: 'DONATION_COMPLETED',
-      }));
-
-      // Notifications and audit
-      const donorUid = donation.donorUid || donation.donorId;
-      if (donorUid) {
-        await sendNotification({
-          recipientUid: donorUid,
-          type: NOTIFICATION_TYPES.DONATION_COMPLETED,
-          title: 'Donation Completed & Verified!',
-          message: `Your blood donation has been verified and confirmed on-site by the recipient. Thank you!`,
-          requestId: request.id,
-          donationId: donation.id,
-        }).catch(e => console.warn("Notice sending notification:", e));
-      }
-
-      await logAuditEvent({
-        action: AUDIT_ACTIONS.DONATION_COMPLETED,
-        actorUid: currentUser.uid,
-        entityType: 'donation',
-        entityId: donation.id,
-        metadata: { requestId: request.id },
-      }).catch(e => console.warn("Notice logging audit:", e));
-
-      alert("Donation successfully confirmed and recorded! Thank you.");
-    } catch (err) {
-      console.error("Verification error:", err);
-      setOtpError(err.message || "Failed to confirm donation.");
-    } finally {
-      setIsVerifying(false);
-    }
-  };
-
-  const isCompleted = donation.completed || donation.status === 'DONATION_COMPLETED';
-
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm text-xs space-y-3">
-      <div className="flex items-start justify-between">
-        <div>
-          <span className="font-bold text-gray-900 text-sm block">
-            {donation.donorName || donorDetails?.name || donorDetails?.Name || 'Anonymous Donor'}
-          </span>
-          <span className="text-gray-500 font-mono">
-            {donorDetails?.mobile || donorDetails?.MobileNumber || donation.donorEmail}
-          </span>
+  // If donation is cancelled, render a soft record without active OTP controls
+  if (isCancelled) {
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm flex items-center justify-between text-xs text-gray-500">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-gray-100 text-gray-600 flex items-center justify-center font-bold text-xs">
+            {donorBlood}
+          </div>
+          <div>
+            <h5 className="font-bold text-gray-700">{donorName}</h5>
+            <p className="text-[11px] text-gray-400">
+              {donation.cancellationReason ? `Reason: ${donation.cancellationReason}` : 'Pledge cancelled.'}
+            </p>
+          </div>
         </div>
-
-        <span className={`px-2.5 py-0.5 rounded-full font-bold uppercase text-[10px] ${
-          isCompleted ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
-        }`}>
-          {isCompleted ? 'Completed' : 'Awaiting On-Site Verification'}
+        <span className="bg-gray-100 text-gray-600 font-bold px-2 py-0.5 rounded text-[10px] uppercase">
+          Cancelled
         </span>
       </div>
+    );
+  }
 
-      {isCompleted ? (
-        <div className="bg-green-50 text-green-800 p-2.5 rounded-lg font-semibold flex items-center gap-2">
-          <Check className="w-4 h-4 text-green-600" />
-          Donation confirmed and verified on-site.
-        </div>
-      ) : (
-        <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3.5 space-y-3">
-          {/* Tell donor your requester verbal OTP */}
-          <div className="bg-white p-3 rounded-lg border border-amber-200 flex items-center justify-between">
+  // If completed, show verified completion banner
+  if (isCompleted) {
+    return (
+      <div className="bg-white rounded-2xl border border-green-200 p-4 shadow-sm space-y-3 bg-green-50/20">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-green-100 pb-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-green-100 text-green-800 flex items-center justify-center font-black text-sm border border-green-200">
+              {donorBlood}
+            </div>
             <div>
-              <p className="text-gray-500 text-[11px]">Your 4-Digit Requester Code (give to donor at hospital):</p>
-              {requesterVerbalOtp ? (
-                <p className="text-2xl font-black text-red-700 tracking-widest mt-0.5">{requesterVerbalOtp}</p>
-              ) : (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={handleGenerateRequesterOtp}
-                  disabled={isGeneratingOtp}
-                  className="mt-1 text-xs border-red-300 text-red-700 hover:bg-red-50"
-                >
-                  {isGeneratingOtp ? 'Generating...' : 'Reveal / Generate My Code'}
-                </Button>
-              )}
-            </div>
-            <div className="text-right">
-              <span className="text-[10px] text-gray-400 block max-w-[120px]">
-                Valid for 10 minutes.
-              </span>
-              {requesterVerbalOtp && (
-                <button
-                  onClick={handleGenerateRequesterOtp}
-                  disabled={isGeneratingOtp}
-                  className="text-[10px] text-red-600 hover:underline mt-1 font-semibold"
-                >
-                  Regenerate Code
-                </button>
-              )}
+              <h4 className="font-extrabold text-gray-900 text-sm">{donorName}</h4>
+              <p className="text-xs text-green-700 font-medium">1 Unit Donated & Fully Verified</p>
             </div>
           </div>
+          <span className="bg-green-100 text-green-800 font-bold text-xs px-2.5 py-1 rounded-full uppercase tracking-wider flex items-center gap-1">
+            <Check className="w-3.5 h-3.5 text-green-600" /> Verified Complete
+          </span>
+        </div>
+      </div>
+    );
+  }
 
-          {/* Enter OTP given by donor */}
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm space-y-4">
+      {/* Donor Card Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-red-50 text-red-700 flex items-center justify-center font-black text-sm border border-red-100">
+            {donorBlood}
+          </div>
           <div>
-            <p className="font-semibold text-gray-800 mb-2">
-              Enter the 4-digit code given by the donor to confirm donation:
-            </p>
-            <OtpInput onChange={setEnteredOtp} />
-
-            {otpError && (
-              <p className="text-red-600 font-medium text-xs mt-2 text-center">{otpError}</p>
-            )}
-
-            <Button
-              onClick={handleVerifyDonorOtp}
-              disabled={isVerifying || enteredOtp.length !== 4}
-              className="w-full mt-3 bg-red-600 hover:bg-red-700 text-white font-bold py-2.5 rounded-lg"
-            >
-              {isVerifying ? 'Confirming...' : 'Verify Donor Code & Confirm Donation'}
-            </Button>
+            <h4 className="font-extrabold text-slate-900 text-sm">{donorName}</h4>
+            <p className="text-xs text-slate-500 font-mono">{donorContact}</p>
           </div>
         </div>
-      )}
+
+        <StatusBadge status={donation.status || 'OTP_PENDING'} type="donation" />
+      </div>
+
+      {/* Dual OTP Verification Interface only for active uncancelled requests */}
+      <DualOtpVerification
+        donation={donation}
+        request={request}
+        currentRole="REQUESTER"
+        currentUser={currentUser}
+      />
     </div>
   );
 }

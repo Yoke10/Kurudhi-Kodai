@@ -92,6 +92,7 @@ service cloud.firestore {
         allow read: if isAuthenticated() && (
           resource.data.donorId == request.auth.uid ||
           resource.data.donorUid == request.auth.uid ||
+          resource.data.requesterUid == request.auth.uid ||
           get(/databases/$(database)/documents/requests/$(requestId)).data.createdByUid == request.auth.uid ||
           get(/databases/$(database)/documents/requests/$(requestId)).data.uuid == request.auth.uid ||
           isAdmin()
@@ -108,6 +109,7 @@ service cloud.firestore {
         allow update: if isAuthenticated() && (
           resource.data.donorId == request.auth.uid ||
           resource.data.donorUid == request.auth.uid ||
+          resource.data.requesterUid == request.auth.uid ||
           get(/databases/$(database)/documents/requests/$(requestId)).data.createdByUid == request.auth.uid ||
           get(/databases/$(database)/documents/requests/$(requestId)).data.uuid == request.auth.uid ||
           isAdmin()
@@ -135,22 +137,24 @@ service cloud.firestore {
       }
     }
 
-    // 4. Standalone Donations collection (future / normalized)
-    match /donations/{donationId} {
+    // 4. Standalone Donations collection & Collection Group queries across all requests
+    match /{path=**}/donations/{donationId} {
       allow read: if isAuthenticated() && (
+        resource.data.donorId == request.auth.uid ||
         resource.data.donorUid == request.auth.uid ||
         resource.data.requesterUid == request.auth.uid ||
         isAdmin()
       );
       
       allow create: if isAuthenticated() && 
-        request.resource.data.donorUid == request.auth.uid &&
+        (request.resource.data.donorUid == request.auth.uid || request.resource.data.donorId == request.auth.uid) &&
         !('donorOtp' in request.resource.data) &&
         !('requesterOtp' in request.resource.data) &&
         !('otp' in request.resource.data);
       
       allow update: if isAuthenticated() && (
         resource.data.donorUid == request.auth.uid ||
+        resource.data.donorId == request.auth.uid ||
         resource.data.requesterUid == request.auth.uid ||
         isAdmin()
       ) &&
@@ -217,6 +221,17 @@ service cloud.firestore {
         (!('action' in request.resource.data) || !request.resource.data.action in ['ROLE_CHANGED', 'ADMIN_ACTION']) ||
         isAdmin();
       allow update, delete: if false; // Immutable audit trail
+    }
+
+    // 10. Donor Commitments - Enforces one active donation per donor atomically
+    match /donorCommitments/{donorId} {
+      allow read: if isAuthenticated();
+      // Owner or Admin can establish an active commitment
+      allow create: if isOwner(donorId) || isAdmin();
+      // Owner, Admin, or authenticated requester can release/cancel commitment
+      allow update: if isOwner(donorId) || isAdmin() || 
+        (isAuthenticated() && request.resource.data.status in ['CANCELLED', 'RELEASED']);
+      allow delete: if isSuperAdmin();
     }
   }
 }

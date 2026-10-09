@@ -7,17 +7,6 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { doc, getDoc, collection, getCountFromServer } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-import OurTeamPage from '@/components/Team';
-
-const TeamMember = ({ name, role, image }) => (
-  <div className="bg-white rounded-2xl shadow-2xl overflow-hidden transform hover:-translate-y-2 transition-transform duration-300">
-    <img src={image} alt={name} className="w-full h-56 object-cover" />
-    <div className="p-6">
-      <h3 className="text-2xl font-bold text-red-700">{name}</h3>
-      <p className="text-lg text-gray-600">{role}</p>
-    </div>
-  </div>
-);
 
 const ValueCard = ({ icon: Icon, title, description }) => (
   <div className="bg-white p-8 rounded-2xl shadow-xl hover:shadow-2xl transition-shadow">
@@ -152,9 +141,6 @@ export default function About() {
 
       {/* Achievements Section */}
       
-
-      {/* Team Section */}
-      <OurTeamPage/>
 
       {/* CTA Section */}
       <section className="py-20 bg-red-700 text-white">
